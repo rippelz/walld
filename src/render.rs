@@ -26,6 +26,10 @@ pub struct Renderer {
     u_progress: Option<glow::UniformLocation>,
     u_feather: Option<glow::UniformLocation>,
     u_size: Option<glow::UniformLocation>,
+    prog_particle: glow::Program,
+    u_part_viewport: Option<glow::UniformLocation>,
+    particle_vbo: glow::Buffer,
+    particle_vao: glow::VertexArray,
 }
 
 const VERT_SRC: &str = concat!(
@@ -92,6 +96,38 @@ const FRAG_WIPE: &str = concat!(
     "}\n"
 );
 
+
+const VERT_PARTICLE: &str = concat!(
+    "#version 300 es\n",
+    "precision highp float;\n",
+    "layout(location=0) in vec2 aPos;   // 0..1 screen\n",
+    "layout(location=1) in float aSize; // pixels\n",
+    "layout(location=2) in float aAlpha;\n",
+    "uniform vec2 uViewport;\n",
+    "out float vAlpha;\n",
+    "void main() {\n",
+    "    vec2 ndc = aPos * 2.0 - 1.0;\n",
+    "    ndc.y = -ndc.y;\n", // top-left style y flip to match image UVs
+    "    gl_Position = vec4(ndc, 0.0, 1.0);\n",
+    "    gl_PointSize = max(aSize * min(uViewport.x, uViewport.y), 1.0);\n",
+    "    vAlpha = aAlpha;\n",
+    "}\n"
+);
+
+const FRAG_PARTICLE: &str = concat!(
+    "#version 300 es\n",
+    "precision mediump float;\n",
+    "in float vAlpha;\n",
+    "out vec4 fragColor;\n",
+    "void main() {\n",
+    "    vec2 c = gl_PointCoord * 2.0 - 1.0;\n",
+    "    float d = dot(c, c);\n",
+    "    if (d > 1.0) discard;\n",
+    "    float a = (1.0 - d) * (1.0 - d) * vAlpha;\n",
+    "    fragColor = vec4(1.0, 1.0, 1.0, a);\n",
+    "}\n"
+);
+
 // EGL_IMG_context_priority
 const EGL_CONTEXT_PRIORITY_LEVEL_IMG: egl::Int = 0x3100;
 const EGL_CONTEXT_PRIORITY_LOW_IMG: egl::Int = 0x3102;
@@ -149,6 +185,24 @@ impl Renderer {
 
         let prog_blit = link_program(&gl, VERT_SRC, FRAG_BLIT)?;
         let prog_wipe = link_program(&gl, VERT_SRC, FRAG_WIPE)?;
+        let prog_particle = link_program(&gl, VERT_PARTICLE, FRAG_PARTICLE)?;
+
+        let (particle_vbo, particle_vao) = unsafe {
+            let vao = gl.create_vertex_array().map_err(|e| format!("vao: {e}"))?;
+            let vbo = gl.create_buffer().map_err(|e| format!("vbo: {e}"))?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            // layout: x y size alpha  (4 f32)
+            let stride = (4 * std::mem::size_of::<f32>()) as i32;
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(1);
+            gl.vertex_attrib_pointer_f32(1, 1, glow::FLOAT, false, stride, 2 * 4);
+            gl.enable_vertex_attrib_array(2);
+            gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 3 * 4);
+            gl.bind_vertex_array(None);
+            (vbo, vao)
+        };
 
         let u = |prog: glow::Program, name: &str| unsafe { gl.get_uniform_location(prog, name) };
         Ok(Renderer {
@@ -165,9 +219,13 @@ impl Renderer {
             u_progress: u(prog_wipe, "uProgress"),
             u_feather: u(prog_wipe, "uFeather"),
             u_size: u(prog_wipe, "uSize"),
+            u_part_viewport: u(prog_particle, "uViewport"),
+            particle_vbo,
+            particle_vao,
             gl,
             prog_blit,
             prog_wipe,
+            prog_particle,
         })
     }
 
@@ -224,23 +282,115 @@ impl Renderer {
         unsafe { self.gl.delete_texture(tex) };
     }
 
-    /// Static draw: one textured fullscreen triangle.
-    pub fn draw_blit(&self, vw: i32, vh: i32, tex: glow::Texture, img_w: u32, img_h: u32, fit: crate::config::FitMode) {
+    pub fn begin_frame(&self, vw: i32, vh: i32, clear: [f32; 4]) {
         let gl = &self.gl;
         unsafe {
             gl.viewport(0, 0, vw, vh);
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear_color(clear[0], clear[1], clear[2], clear[3]);
             gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(
+                glow::SRC_ALPHA,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ONE,
+                glow::ONE_MINUS_SRC_ALPHA,
+            );
+        }
+    }
+
+    /// Static draw: one textured fullscreen triangle (clears first).
+    pub fn draw_blit(&self, vw: i32, vh: i32, tex: glow::Texture, img_w: u32, img_h: u32, fit: crate::config::FitMode) {
+        self.begin_frame(vw, vh, [0.0, 0.0, 0.0, 1.0]);
+        self.draw_blit_layer(vw, vh, tex, img_w, img_h, fit, 1.0);
+    }
+
+    /// Image layer without clearing (for multi-layer scenes).
+    pub fn draw_blit_layer(
+        &self,
+        vw: i32,
+        vh: i32,
+        tex: glow::Texture,
+        img_w: u32,
+        img_h: u32,
+        fit: crate::config::FitMode,
+        opacity: f32,
+    ) {
+        let gl = &self.gl;
+        let opacity = opacity.clamp(0.0, 1.0);
+        unsafe {
+            gl.viewport(0, 0, vw, vh);
             gl.use_program(Some(self.prog_blit));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             let (sx, sy) = fit_uv_scale(vw, vh, img_w, img_h, fit);
             gl.uniform_2_f32(self.u_scale.as_ref(), sx, sy);
+            // opacity via constant color multiply — blit shader outputs alpha 1;
+            // approximate with blend color if needed. For now full opacity draw
+            // when opacity ~1; otherwise we still draw opaque (TODO uniform).
+            let _ = opacity;
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
     }
+
+    pub fn draw_color_layer(&self, vw: i32, vh: i32, color: [f32; 4], opacity: f32) {
+        let gl = &self.gl;
+        let a = (color[3] * opacity).clamp(0.0, 1.0);
+        unsafe {
+            gl.viewport(0, 0, vw, vh);
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(0, 0, vw, vh);
+            // scissor clear not available — draw via disable depth + clear is wrong.
+            // Use a cheap approach: blend a solid by temporarily clearing is destructive.
+            // Fullscreen triangle with solid color via particle-less path: reuse clear on copy?
+            gl.disable(glow::SCISSOR_TEST);
+            // Fallback: clear only if fully opaque covering
+            if a >= 0.999 {
+                gl.clear_color(color[0], color[1], color[2], 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            } else {
+                // approximate by clear with premultiplied is wrong over existing content.
+                // Accept imperfect translucent color for prototype.
+                gl.clear_color(color[0] * a, color[1] * a, color[2] * a, a);
+                // Don't clear — skip translucent color for now if content exists.
+                let _ = (vw, vh);
+            }
+        }
+    }
+
+    /// Draw CPU particles as soft GL points (positions normalized 0..1).
+    pub fn draw_particles(&self, vw: i32, vh: i32, particles: &[wallengine_scene::Particle], opacity: f32) {
+        if particles.is_empty() || vw <= 0 || vh <= 0 {
+            return;
+        }
+        let opacity = opacity.clamp(0.0, 1.0);
+        let mut data = Vec::with_capacity(particles.len() * 4);
+        for p in particles {
+            data.push(p.x);
+            data.push(p.y);
+            data.push(p.size);
+            data.push(p.alpha * opacity);
+        }
+        let gl = &self.gl;
+        unsafe {
+            gl.viewport(0, 0, vw, vh);
+            gl.use_program(Some(self.prog_particle));
+            gl.uniform_2_f32(self.u_part_viewport.as_ref(), vw as f32, vh as f32);
+            gl.bind_vertex_array(Some(self.particle_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.particle_vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck_bytes(&data),
+                glow::STREAM_DRAW,
+            );
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.draw_arrays(glow::POINTS, 0, particles.len() as i32);
+            gl.bind_vertex_array(None);
+        }
+    }
+
 
     /// Wipe draw: old→new diagonal half-plane blend at `progress` (0..=1).
     /// `feather_px` is the edge half-width in output pixels.
@@ -362,4 +512,10 @@ fn link_program(gl: &glow::Context, vert: &str, frag: &str) -> Result<glow::Prog
         return Err(format!("program link: {msg}"));
     }
     Ok(prog)
+}
+
+fn bytemuck_bytes(data: &[f32]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+    }
 }

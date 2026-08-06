@@ -30,6 +30,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 
 use config::{FitMode, Transition, WalldConfig, WallpaperCfg};
 use ipc::IpcCmd;
+use wallengine_scene::{FitMode as SceneFit, SceneRuntime};
 use wayland::{Output, OutputInfo, PendingWall, SurfaceState, Texture, WipeState, NAMESPACE};
 
 /// Decoded image result coming back from the worker thread.
@@ -58,6 +59,12 @@ struct Daemon {
     decode_tx: std::sync::mpsc::Sender<PathBuf>,
     loop_signal: Option<LoopSignal>,
     running: bool,
+    /// Active engine scene (None = classic single-image mode).
+    scene: Option<SceneRuntime>,
+    scene_path: Option<PathBuf>,
+    /// path → GPU texture for scene image layers.
+    scene_tex: HashMap<PathBuf, Texture>,
+    last_scene_tick: Instant,
 }
 
 impl Daemon {
@@ -78,6 +85,10 @@ impl Daemon {
             decode_tx,
             loop_signal: None,
             running: true,
+            scene: None,
+            scene_path: None,
+            scene_tex: HashMap::new(),
+            last_scene_tick: Instant::now(),
         })
     }
 
@@ -164,6 +175,19 @@ impl Daemon {
     /// (Re)load config files and push wallpapers to outputs.
     fn reload(&mut self, transition_override: Option<Transition>) {
         self.cfg = config::load_global();
+        if let Some(scene) = self.cfg.scene.clone() {
+            match self.load_scene(&scene) {
+                Ok(()) => {
+                    log::info!("config: scene {}", scene.display());
+                    return;
+                }
+                Err(e) => log::warn!("config scene failed ({e}); falling back to images"),
+            }
+        }
+        // Classic per-monitor images from hyprpaper.conf
+        if self.scene.is_some() {
+            self.clear_scene();
+        }
         let walls = config::read_hyprpaper_conf(&self.cfg.hyprpaper_conf);
         log::info!(
             "config: {} wallpaper block(s) from {} (transition={:?})",
@@ -203,6 +227,10 @@ impl Daemon {
 
     /// IPC `set`/`snap`/`wipe` — monitor is a name or "*".
     fn set_wallpaper(&mut self, monitor: &str, path: &std::path::Path, transition_override: Option<Transition>) {
+        // Classic image path exits engine scene mode.
+        if self.scene.is_some() {
+            self.clear_scene();
+        }
         let transition = transition_override.unwrap_or(self.cfg.transition);
         // Keep the in-memory per-monitor table consistent for status/reload.
         if monitor != "*" {
@@ -358,6 +386,10 @@ impl Daemon {
     /// Draw one output's current state (static frame or wipe at current time).
     /// Returns true if an animation is still running.
     fn draw_output(&mut self, out_id: wayland_client::backend::ObjectId) -> bool {
+        // Engine scene mode takes priority over classic single-image wallpapers.
+        if self.scene.is_some() {
+            return self.draw_scene_on(out_id);
+        }
         let Some(out) = self.outputs.get_mut(&out_id) else { return false };
         let Some(s) = out.surface.as_mut() else { return false };
         let Some(win) = s.egl_window.as_ref() else { return false };
@@ -410,16 +442,36 @@ impl Daemon {
 
     /// Advance all wipes one frame. Returns Some(next tick) if still animating.
     fn tick_animations(&mut self) -> Option<Instant> {
+        let mut next: Option<Instant> = None;
+
+        // Scene particle tick + redraw all outputs that have surfaces.
+        if self.scene_needs_anim() {
+            let dt = self.last_scene_tick.elapsed().as_secs_f32();
+            self.last_scene_tick = Instant::now();
+            if let Some(sc) = self.scene.as_mut() {
+                sc.tick(dt);
+            }
+            let ids: Vec<_> = self.outputs.keys().cloned().collect();
+            for id in ids {
+                let _ = self.draw_output(id);
+            }
+            let frame = Duration::from_secs_f32(1.0 / self.cfg.scene_fps.max(5) as f32);
+            next = Some(Instant::now() + frame);
+        }
+
         let ids: Vec<_> = self
             .outputs
             .iter()
             .filter(|(_, o)| o.wipe.is_some())
             .map(|(id, _)| id.clone())
             .collect();
-        let mut next: Option<Instant> = None;
         for id in ids {
             if self.draw_output(id) {
-                next = Some(Instant::now() + Duration::from_millis(8));
+                let t = Instant::now() + Duration::from_millis(8);
+                next = Some(match next {
+                    Some(n) => n.min(t),
+                    None => t,
+                });
             }
         }
         next
@@ -431,11 +483,17 @@ impl Daemon {
             IpcCmd::Ping => "ok pong".to_string(),
             IpcCmd::Status => {
                 let mut parts = vec!["ok".to_string()];
+                if let Some(sc) = &self.scene {
+                    let anim = if sc.is_animated() { "animated" } else { "static" };
+                    parts.push(format!("scene={} ({anim})", sc.name()));
+                }
                 let mut outs: Vec<_> = self.outputs.values().collect();
                 outs.sort_by(|a, b| a.info.name.cmp(&b.info.name));
                 for o in outs {
                     let state = if o.surface.is_none() {
                         "stopped"
+                    } else if self.scene.is_some() {
+                        "scene"
                     } else if o.wipe.is_some() {
                         "wiping"
                     } else if o.pending_path.is_some() {
@@ -445,7 +503,11 @@ impl Daemon {
                     } else {
                         "empty"
                     };
-                    let path = o.current_path.as_deref().map(|p| p.display().to_string()).unwrap_or_default();
+                    let path = o
+                        .current_path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
                     parts.push(format!("{}={path} ({state})", o.info.name));
                 }
                 parts.join(" ")
@@ -494,17 +556,27 @@ impl Daemon {
             }
             IpcCmd::Ready => {
                 // "ready" = every known output has a visible frame (or no outputs yet).
+                let has_scene = self.scene.is_some();
                 let waiting = self
                     .outputs
                     .values()
                     .filter(|o| {
-                        !o.surface.as_ref().is_some_and(|s| s.committed) || (o.current.is_none() && o.wipe.is_none())
+                        !o.surface.as_ref().is_some_and(|s| s.committed)
+                            || (!has_scene && o.current.is_none() && o.wipe.is_none())
                     })
                     .count();
                 if waiting == 0 {
                     "ok ready".to_string()
                 } else {
                     format!("err waiting:{waiting}")
+                }
+            }
+            IpcCmd::Scene { monitor, path } => {
+                // monitor currently ignored (all outputs share one scene); kept for API.
+                let _ = monitor;
+                match self.load_scene(&path) {
+                    Ok(()) => "ok scene".to_string(),
+                    Err(e) => format!("err {e}"),
                 }
             }
             IpcCmd::Quit => {
@@ -538,6 +610,158 @@ impl Daemon {
         }
         out.current_path = None;
         out.pending_path = None;
+    }
+
+    fn map_fit(f: SceneFit) -> FitMode {
+        match f {
+            SceneFit::Cover => FitMode::Cover,
+            SceneFit::Contain => FitMode::Contain,
+            SceneFit::Fill => FitMode::Fill,
+        }
+    }
+
+    /// Load a scene file and warm image textures. Applies to all outputs for now.
+    fn load_scene(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let rt = SceneRuntime::load(path)?;
+        log::info!("scene loaded: {} ({})", rt.name(), path.display());
+        // Upload image layers (sync decode for prototype).
+        let paths: Vec<PathBuf> = rt
+            .image_paths
+            .iter()
+            .filter_map(|p| p.clone())
+            .collect();
+        for p in paths {
+            if self.scene_tex.contains_key(&p) {
+                continue;
+            }
+            match image::decode_file(&p) {
+                Ok(img) => {
+                    let tex = self.renderer.upload_rgba(&img.rgba, img.width, img.height);
+                    self.scene_tex.insert(
+                        p.clone(),
+                        Texture {
+                            tex,
+                            w: img.width,
+                            h: img.height,
+                        },
+                    );
+                    log::debug!("scene tex {} ({}x{})", p.display(), img.width, img.height);
+                }
+                Err(e) => log::warn!("scene image {}: {e}", p.display()),
+            }
+        }
+        self.scene = Some(rt);
+        self.scene_path = Some(path.to_path_buf());
+        // Clear classic wipe/current so scene owns the frame.
+        let ids: Vec<_> = self.outputs.keys().cloned().collect();
+        for id in ids {
+            if let Some(out) = self.outputs.get_mut(&id) {
+                if let Some(w) = out.wipe.take() {
+                    self.renderer.delete_texture(w.old.tex);
+                    self.renderer.delete_texture(w.new.tex);
+                }
+                // keep current textures alive? free them — scene uses scene_tex
+                if let Some(c) = out.current.take() {
+                    self.renderer.delete_texture(c.tex);
+                }
+                out.current_path = self.scene_path.clone();
+                out.pending_path = None;
+            }
+            self.draw_output(id);
+        }
+        self.last_scene_tick = Instant::now();
+        Ok(())
+    }
+
+    fn clear_scene(&mut self) {
+        self.scene = None;
+        self.scene_path = None;
+        // Free scene textures
+        let texs: Vec<_> = self.scene_tex.drain().map(|(_, t)| t).collect();
+        for t in texs {
+            self.renderer.delete_texture(t.tex);
+        }
+    }
+
+    fn scene_needs_anim(&self) -> bool {
+        self.scene.as_ref().is_some_and(|s| s.is_animated())
+    }
+
+    fn draw_scene_on(&mut self, out_id: wayland_client::backend::ObjectId) -> bool {
+        let Some(out) = self.outputs.get(&out_id) else { return false };
+        let Some(s) = out.surface.as_ref() else { return false };
+        let Some(win) = s.egl_window.as_ref() else { return false };
+        if s.width == 0 || s.height == 0 {
+            return false;
+        }
+        let (w, h) = (s.width as i32, s.height as i32);
+        if self.renderer.attach_window(win).is_err() {
+            return false;
+        }
+
+        // Borrow scene data without holding &mut outputs across draws.
+        let clear = self
+            .scene
+            .as_ref()
+            .map(|sc| sc.doc.clear)
+            .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        self.renderer.begin_frame(w, h, clear);
+
+        // Collect draw ops first to avoid borrow issues.
+        enum Op {
+            Color([f32; 4], f32),
+            Image(PathBuf, FitMode, f32),
+            Particles(usize, f32), // index into scene.particles
+        }
+        let mut ops = Vec::new();
+        if let Some(sc) = self.scene.as_ref() {
+            for (i, layer) in sc.doc.layers.iter().enumerate() {
+                match layer {
+                    wallengine_scene::LayerDoc::Color { color, opacity, .. } => {
+                        ops.push(Op::Color(*color, *opacity));
+                    }
+                    wallengine_scene::LayerDoc::Image { fit, opacity, .. } => {
+                        if let Some(path) = sc.image_paths[i].clone() {
+                            ops.push(Op::Image(path, Self::map_fit(*fit), *opacity));
+                        }
+                    }
+                    wallengine_scene::LayerDoc::Particles { opacity, .. } => {
+                        ops.push(Op::Particles(i, *opacity));
+                    }
+                }
+            }
+        }
+
+        for op in ops {
+            match op {
+                Op::Color(color, opacity) => {
+                    self.renderer.draw_color_layer(w, h, color, opacity);
+                }
+                Op::Image(path, fit, opacity) => {
+                    if let Some(tex) = self.scene_tex.get(&path) {
+                        self.renderer
+                            .draw_blit_layer(w, h, tex.tex, tex.w, tex.h, fit, opacity);
+                    }
+                }
+                Op::Particles(i, opacity) => {
+                    if let Some(sc) = self.scene.as_ref() {
+                        if let Some(sys) = sc.particles[i].as_ref() {
+                            self.renderer
+                                .draw_particles(w, h, &sys.particles, opacity * sys.opacity);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.renderer.swap();
+        if let Some(out) = self.outputs.get_mut(&out_id) {
+            if let Some(s) = out.surface.as_mut() {
+                s.wl_surface.commit();
+                s.committed = true;
+            }
+        }
+        self.scene_needs_anim()
     }
 }
 
@@ -700,7 +924,7 @@ fn main() {
     if args.len() >= 2 && args[1] == "ctl" {
         let line = args[2..].join(" ");
         if line.trim().is_empty() {
-            eprintln!("usage: walld ctl <ping|status|reload|set|snap|wipe|preload|stop|start|ready|quit>");
+            eprintln!("usage: walld ctl <ping|status|reload|set|snap|wipe|scene|preload|stop|start|ready|quit>");
             std::process::exit(2);
         }
         std::process::exit(ipc::client_call(&line));
@@ -815,7 +1039,8 @@ fn main() {
 
     /// Arm the animation timer ~now if any wipe is in flight.
     fn arm_timer(daemon: &Daemon, timerfd: &TimerFd) {
-        if daemon.outputs.values().any(|o| o.wipe.is_some()) {
+        let need = daemon.scene_needs_anim() || daemon.outputs.values().any(|o| o.wipe.is_some());
+        if need {
             let _ = timerfd.set(
                 Expiration::OneShot(Duration::from_millis(1).into()),
                 TimerSetTimeFlags::empty(),

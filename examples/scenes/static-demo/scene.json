@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "static-yozakura",
+  "clear": [0, 0, 0, 1],
+  "layers": [
+    {
+      "type": "image",
+      "id": "bg",
+      "path": "/home/beebit/Pictures/Wallpapers/yozakura.jpg",
+      "fit": "cover",
+      "opacity": 1.0
+    }
+  ]
+}

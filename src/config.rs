@@ -34,6 +34,10 @@ pub struct WalldConfig {
     /// Feather half-width of the wipe edge, in screen pixels.
     pub wipe_feather_px: f32,
     pub hyprpaper_conf: PathBuf,
+    /// Optional scene file (wallpaper engine mode). When set, overrides per-monitor images.
+    pub scene: Option<PathBuf>,
+    /// Max FPS for animated scenes.
+    pub scene_fps: u32,
 }
 
 impl Default for WalldConfig {
@@ -43,6 +47,8 @@ impl Default for WalldConfig {
             wipe_ms: 480,
             wipe_feather_px: 80.0,
             hyprpaper_conf: default_hyprpaper_conf(),
+            scene: None,
+            scene_fps: 30,
         }
     }
 }
@@ -168,6 +174,12 @@ pub fn load_global() -> WalldConfig {
                 }
             }
             "hyprpaper_conf" => cfg.hyprpaper_conf = expand(v),
+            "scene" => cfg.scene = Some(expand(v)),
+            "scene_fps" => {
+                if let Ok(n) = v.parse::<u32>() {
+                    cfg.scene_fps = n.clamp(5, 120);
+                }
+            }
             _ => log::warn!("config: unknown key '{k}'"),
         }
     }

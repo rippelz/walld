@@ -11,6 +11,31 @@ toolkit and not a hyprpaper clone.
 3. Transitions: `snap` (instant) or `wipe` (GPU diagonal reveal)
 4. Coexists with **hyprmotion** for video themes (`stop` / `start` handoff)
 
+
+## Scenes (wallpaper engine prototype)
+
+Scene documents are JSON (schema v1). Shared crate: `wallengine-scene`.
+
+```bash
+# load a scene on all monitors
+walld ctl scene '*' ~/.local/share/wallengine/scenes/yozakura-snow/scene.json
+walld ctl status   # shows scene=yozakura-snow (animated)
+
+# example scenes ship in examples/scenes/ and install to:
+#   ~/.local/share/wallengine/scenes/
+```
+
+Layer types so far: `image`, `color`, `particles` (presets: `snow`, `dust`).
+
+Optional in `~/.config/walld/config`:
+
+```
+scene = ~/.local/share/wallengine/scenes/yozakura-snow/scene.json
+scene_fps = 30
+```
+
+Classic `hyprpaper.conf` image mode still works when `scene` is unset.
+
 ## Build / install
 
 ```bash

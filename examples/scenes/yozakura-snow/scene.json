@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "yozakura-snow",
+  "clear": [0.02, 0.02, 0.05, 1.0],
+  "layers": [
+    {
+      "type": "image",
+      "id": "bg",
+      "path": "/home/beebit/Pictures/Wallpapers/yozakura.jpg",
+      "fit": "cover",
+      "opacity": 1.0
+    },
+    {
+      "type": "particles",
+      "id": "snow",
+      "preset": "snow",
+      "count": 900,
+      "speed": 0.45,
+      "opacity": 0.9
+    }
+  ],
+  "transition": { "mode": "wipe", "ms": 480 }
+}

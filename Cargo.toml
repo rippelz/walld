@@ -1,8 +1,12 @@
+[workspace]
+members = [".", "crates/wallengine-scene"]
+resolver = "2"
+
 [package]
 name = "walld"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight Hyprland wallpaper daemon (layer-shell + EGL/GLES, diagonal wipe transitions)"
+description = "Wayland wallpaper engine daemon (layer-shell + EGL/GLES scenes)"
 license = "MIT"
 
 [[bin]]
@@ -23,6 +27,7 @@ log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["humantime", "auto-color"] }
 thiserror = "1"
 nix = { version = "0.28", default-features = false, features = ["time", "process", "fs", "signal"] }
+wallengine-scene = { path = "crates/wallengine-scene" }
 
 [profile.release]
 opt-level = 2

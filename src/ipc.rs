@@ -27,6 +27,8 @@ pub enum IpcCmd {
     Stop,
     Start,
     Ready,
+    /// Load a scene document on monitor(s).
+    Scene { monitor: String, path: PathBuf },
     Quit,
 }
 
@@ -62,6 +64,11 @@ pub fn parse_line(line: &str) -> Result<IpcCmd, String> {
         "stop" => IpcCmd::Stop,
         "start" => IpcCmd::Start,
         "ready" => IpcCmd::Ready,
+        "scene" => {
+            let monitor = next(&mut parts, "<monitor|*>")?;
+            let path = expand(&next(&mut parts, "<path>")?);
+            IpcCmd::Scene { monitor, path }
+        }
         "quit" => IpcCmd::Quit,
         other => return Err(format!("unknown command '{other}'")),
     })
