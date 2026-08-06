@@ -26,8 +26,6 @@ mod pal {
     pub const ERR: Color = Color::from_rgb(0.82, 0.38, 0.35);
     pub const SIDE: f32 = 220.0;
     pub const DETAIL: f32 = 320.0;
-    pub const THUMB_W: f32 = 176.0;
-    pub const THUMB_H: f32 = 110.0;
 }
 
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -166,7 +164,8 @@ fn sidebar(app: &App) -> Element<'_, Message> {
 
 fn gallery(app: &App) -> Element<'_, Message> {
     let vis = app.visible();
-    let cols = 4usize;
+    let (cols, cell_w, thumb_h) = app.grid_metrics();
+    let thumb_w = (cell_w - 8.0).max(120.0);
     if vis.is_empty() {
         return container(
             column![
@@ -194,17 +193,18 @@ fn gallery(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    let mut rows = column![].spacing(18).width(Fill);
+    let gap = 16.0_f32;
+    let mut rows = column![].spacing(gap).width(Fill);
     for chunk in vis.chunks(cols) {
-        let mut r = row![].spacing(18);
+        let mut r = row![].spacing(gap);
         for &idx in chunk {
-            r = r.push(tile(app, idx));
+            r = r.push(tile(app, idx, thumb_w, thumb_h, cell_w));
         }
         for _ in chunk.len()..cols {
             r = r.push(
                 Space::new()
-                    .width(Length::Fixed(pal::THUMB_W + 8.0))
-                    .height(Length::Fixed(pal::THUMB_H + 48.0)),
+                    .width(Length::Fixed(cell_w))
+                    .height(Length::Fixed(thumb_h + 48.0)),
             );
         }
         rows = rows.push(r);
@@ -223,21 +223,24 @@ fn gallery(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn tile(app: &App, idx: usize) -> Element<'_, Message> {
+fn tile(app: &App, idx: usize, thumb_w: f32, thumb_h: f32, cell_w: f32) -> Element<'_, Message> {
     let e = &app.entries[idx];
     let selected = idx == app.cursor;
     let playing = app.runtime.playing
         && (app.runtime.title == e.id || app.runtime.detail.contains(&e.id));
 
+    let img_w = (thumb_w - 2.0).max(80.0);
+    let img_h = (thumb_h - 2.0).max(50.0);
+
     let preview: Element<'_, Message> = if let Some(ref p) = e.preview {
         container(
             image(Handle::from_path(p.clone()))
-                .width(Length::Fixed(pal::THUMB_W - 4.0))
-                .height(Length::Fixed(pal::THUMB_H - 4.0))
+                .width(Length::Fixed(img_w))
+                .height(Length::Fixed(img_h))
                 .content_fit(iced::ContentFit::Cover),
         )
-        .width(Length::Fixed(pal::THUMB_W - 4.0))
-        .height(Length::Fixed(pal::THUMB_H - 4.0))
+        .width(Length::Fixed(img_w))
+        .height(Length::Fixed(img_h))
         .into()
     } else {
         container(
@@ -246,8 +249,8 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
                 .color(pal::MUTE)
                 .font(Font::MONOSPACE),
         )
-        .width(Length::Fixed(pal::THUMB_W - 4.0))
-        .height(Length::Fixed(pal::THUMB_H - 4.0))
+        .width(Length::Fixed(img_w))
+        .height(Length::Fixed(img_h))
         .center_x(Fill)
         .center_y(Fill)
         .style(|_| panel(pal::PANEL2))
@@ -265,7 +268,8 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
     });
 
     let ty = e.project.wallpaper_type.as_label();
-    let title = truncate_chars(&e.project.title, 28);
+    let max_chars = ((thumb_w / 6.5) as usize).clamp(12, 48);
+    let title = truncate_chars(&e.project.title, max_chars);
     let caption = column![
         text(title)
             .size(12)
@@ -285,7 +289,7 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
         ],
     ]
     .spacing(3)
-    .width(Length::Fixed(pal::THUMB_W))
+    .width(Length::Fixed(thumb_w))
     .padding(Padding {
         top: 8.0,
         right: 4.0,
@@ -293,9 +297,8 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
         left: 4.0,
     });
 
-    // Outer pad so selection ring never collides with neighbors
-    let cell = container(column![media, caption].spacing(0))
-        .width(Length::Fixed(pal::THUMB_W + 8.0))
+    let cell = container(column![media, caption].spacing(0).width(Length::Fixed(thumb_w)))
+        .width(Length::Fixed(cell_w))
         .padding(4)
         .style(move |_| container::Style {
             background: Some(Background::Color(if selected {

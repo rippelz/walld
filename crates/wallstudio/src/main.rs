@@ -36,6 +36,9 @@ pub struct App {
     pub last_msg: String,
     pub last_ok: bool,
     pub busy: bool,
+    /// Logical window size — drives responsive gallery columns/tile size.
+    pub window_width: f32,
+    pub window_height: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,7 @@ pub enum Message {
     ToggleSort,
     OpenFolder,
     Key(iced::keyboard::Key, iced::keyboard::Modifiers),
+    Resized(f32, f32),
 }
 
 impl App {
@@ -81,6 +85,8 @@ impl App {
             last_msg: "Wallpaper Engine library · select a tile · Enter to play".into(),
             last_ok: true,
             busy: false,
+            window_width: 1280.0,
+            window_height: 800.0,
         };
         app.reload();
         (app, Task::none())
@@ -100,12 +106,18 @@ impl App {
         Subscription::batch([
             iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
             event::listen_with(|event, status, _id| {
-                // Don't steal keys while a text input (or other widget) is focused.
-                if status == iced::event::Status::Captured {
-                    return None;
-                }
                 match event {
+                    iced::Event::Window(iced::window::Event::Resized(size)) => {
+                        Some(Message::Resized(size.width, size.height))
+                    }
+                    iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
+                        Some(Message::Resized(size.width, size.height))
+                    }
                     iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                        // Don't steal keys while a text input (or other widget) is focused.
+                        if status == iced::event::Status::Captured {
+                            return None;
+                        }
                         Some(Message::Key(key, modifiers))
                     }
                     _ => None,
@@ -195,8 +207,44 @@ impl App {
         }
     }
 
+    /// Sidebar + detail + dividers + chrome subtracted from window width.
+    pub fn gallery_width(&self) -> f32 {
+        const SIDE: f32 = 220.0;
+        const DETAIL: f32 = 320.0;
+        const DIVIDERS: f32 = 4.0;
+        (self.window_width - SIDE - DETAIL - DIVIDERS).max(200.0)
+    }
+
+    /// (columns, cell_width including pad, thumb_height)
+    pub fn grid_metrics(&self) -> (usize, f32, f32) {
+        const PAD: f32 = 32.0; // gallery padding L+R
+        const GAP: f32 = 16.0;
+        const MIN_CELL: f32 = 160.0;
+        // Prefer ~220px target tiles; window growth adds columns *and* fills width.
+        const TARGET_CELL: f32 = 220.0;
+        let avail = (self.gallery_width() - PAD).max(MIN_CELL);
+        let mut cols = ((avail + GAP) / (TARGET_CELL + GAP)).floor() as usize;
+        cols = cols.clamp(1, 16);
+        // Always fill the row — no dead space on the right when resized larger.
+        let cell = (avail - GAP * (cols.saturating_sub(1) as f32)) / cols as f32;
+        // If cells got huge (very wide window, few items), add columns down to ~MIN
+        let mut cols = cols;
+        let mut cell = cell;
+        while cell > 340.0 && cols < 16 {
+            cols += 1;
+            cell = (avail - GAP * (cols.saturating_sub(1) as f32)) / cols as f32;
+        }
+        while cell < MIN_CELL && cols > 1 {
+            cols -= 1;
+            cell = (avail - GAP * (cols.saturating_sub(1) as f32)) / cols as f32;
+        }
+        let thumb_w = (cell - 8.0).max(100.0);
+        let thumb_h = thumb_w * 0.625;
+        (cols, cell, thumb_h)
+    }
+
     fn cols(&self) -> usize {
-        4
+        self.grid_metrics().0
     }
 
     fn apply_selected(&mut self) {
@@ -301,6 +349,10 @@ impl App {
                         .arg(we::workshop_dir())
                         .spawn();
                 }
+            }
+            Message::Resized(w, h) => {
+                self.window_width = w.max(640.0);
+                self.window_height = h.max(480.0);
             }
             Message::Key(key, mods) => {
                 if mods.command() || mods.control() {
