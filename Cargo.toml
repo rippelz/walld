@@ -1,0 +1,29 @@
+[package]
+name = "walld"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight Hyprland wallpaper daemon (layer-shell + EGL/GLES, diagonal wipe transitions)"
+license = "MIT"
+
+[[bin]]
+name = "walld"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-sys = { version = "0.31", features = ["client", "egl", "dlopen"] }
+wayland-egl = "0.32"
+khronos-egl = { version = "6", features = ["static"] }
+glow = "0.18"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+calloop = { version = "0.13", default-features = false, features = ["signals"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime", "auto-color"] }
+thiserror = "1"
+nix = { version = "0.28", default-features = false, features = ["time", "process", "fs", "signal"] }
+
+[profile.release]
+opt-level = 2
+lto = true
+strip = true
