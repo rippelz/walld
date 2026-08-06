@@ -6,7 +6,7 @@ resolver = "2"
 name = "walld"
 version = "0.1.0"
 edition = "2021"
-description = "Wayland wallpaper engine daemon (layer-shell + EGL/GLES scenes)"
+description = "Wayland wallpaper engine daemon — native + Wallpaper Engine content"
 license = "MIT"
 
 [[bin]]
@@ -28,6 +28,8 @@ env_logger = { version = "0.11", default-features = false, features = ["humantim
 thiserror = "1"
 nix = { version = "0.28", default-features = false, features = ["time", "process", "fs", "signal"] }
 wallengine-scene = { path = "crates/wallengine-scene" }
+wallengine-we = { path = "crates/wallengine-we" }
+serde_json = "1"
 
 [profile.release]
 opt-level = 2

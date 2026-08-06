@@ -29,6 +29,9 @@ pub enum IpcCmd {
     Ready,
     /// Load a scene document on monitor(s).
     Scene { monitor: String, path: PathBuf },
+    /// Load a Wallpaper Engine package directory (or workshop folder).
+    We { monitor: String, path: PathBuf },
+    WeStop,
     Quit,
 }
 
@@ -69,6 +72,12 @@ pub fn parse_line(line: &str) -> Result<IpcCmd, String> {
             let path = expand(&next(&mut parts, "<path>")?);
             IpcCmd::Scene { monitor, path }
         }
+        "we" => {
+            let monitor = next(&mut parts, "<monitor|*>")?;
+            let path = expand(&next(&mut parts, "<path>")?);
+            IpcCmd::We { monitor, path }
+        }
+        "we_stop" => IpcCmd::WeStop,
         "quit" => IpcCmd::Quit,
         other => return Err(format!("unknown command '{other}'")),
     })

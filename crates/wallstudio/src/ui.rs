@@ -86,14 +86,13 @@ fn top(app: &App) -> Element<'_, Message> {
         .width(Length::Fixed(240.0))
         .style(search_style);
 
-    let (lwe, mpv) = (app.runtime.lwe_available, app.runtime.mpvpaper_available);
-    let be = text(format!(
-        "LWE {} · mpv {}",
-        if lwe { "OK" } else { "—" },
-        if mpv { "OK" } else { "—" }
-    ))
+    let be = text(if app.runtime.engine_ready {
+        "ENGINE  walld"
+    } else {
+        "ENGINE  offline"
+    })
     .size(11)
-    .color(if lwe { pal::OK } else { pal::ERR })
+    .color(if app.runtime.engine_ready { pal::OK } else { pal::ERR })
     .font(Font::MONOSPACE);
 
     container(
@@ -181,14 +180,10 @@ fn gallery(app: &App) -> Element<'_, Message> {
                     .color(pal::MUTE)
                     .font(Font::MONOSPACE),
                 Space::new().height(12),
-                if !app.runtime.lwe_available {
-                    text("Scene playback needs linux-wallpaperengine\n  yay -S linux-wallpaperengine-git")
-                        .size(12)
-                        .color(pal::ACCENT)
-                        .font(Font::MONOSPACE)
-                } else {
-                    text("")
-                },
+                text("Subscribe in Steam · walld renders content in-process")
+                    .size(12)
+                    .color(pal::MUTE)
+                    .font(Font::MONOSPACE),
             ]
             .spacing(8)
             .align_x(Alignment::Center),
@@ -341,21 +336,9 @@ fn detail(app: &App) -> Element<'_, Message> {
     };
 
     let backend_hint = match e.project.wallpaper_type {
-        WallpaperType::Video => {
-            if app.runtime.mpvpaper_available {
-                "Backend: mpvpaper"
-            } else {
-                "Needs mpvpaper"
-            }
-        }
-        WallpaperType::Scene | WallpaperType::Unknown => {
-            if app.runtime.lwe_available {
-                "Backend: linux-wallpaperengine"
-            } else {
-                "Needs linux-wallpaperengine for scenes"
-            }
-        }
-        WallpaperType::Web | WallpaperType::Application => "Backend: LWE + CEF (web)",
+        WallpaperType::Video => "Decoded in walld (ffmpeg)",
+        WallpaperType::Scene | WallpaperType::Unknown => "Rendered in walld (WE scene)",
+        WallpaperType::Web | WallpaperType::Application => "Not supported yet (web/app)",
     };
 
     let mon = if app.monitor.is_empty() {
@@ -441,8 +424,7 @@ fn detail(app: &App) -> Element<'_, Message> {
 
 fn footer(app: &App) -> Element<'_, Message> {
     let rt = match app.runtime.backend {
-        PlayBackend::LinuxWallpaperEngine => "LWE",
-        PlayBackend::MpvPaper => "mpv",
+        PlayBackend::Walld => "walld",
         PlayBackend::None => "—",
     };
     let status = if app.runtime.playing {

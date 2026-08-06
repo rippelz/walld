@@ -37,43 +37,41 @@ scene_fps = 30
 Classic `hyprpaper.conf` image mode still works when `scene` is unset.
 
 
-## wallstudio — Wallpaper Engine on Hyprland
+## wallstudio — the product
 
-**wallstudio is built around your Steam Wallpaper Engine library**, not as a side panel.
+**wallstudio + walld** are a self-contained Wallpaper Engine client for Hyprland.
+No mpvpaper, no linux-wallpaperengine. Content is rendered **inside walld**.
+
+Fresh install path:
+
+1. Hyprland + Steam + Wallpaper Engine (for workshop content)
+2. Subscribe to wallpapers
+3. Install **walld** + **wallstudio**
+4. Run `wallstudio` → play
 
 ```bash
-cargo build -p wallstudio --release
+cargo build --release -p walld -p wallstudio
+install -Dm755 target/release/walld ~/.local/bin/walld
 install -Dm755 target/release/wallstudio ~/.local/bin/wallstudio
+walld &          # or wallpaper-boot / systemd
 wallstudio
 ```
 
-### What it does
+| Type | How walld plays it |
+|------|---------------------|
+| **Video** | In-engine decode (`ffmpeg` as codec → GL texture) |
+| **Scene** | Unpacks `scene.pkg` (PKGV), decodes `.tex`, draws 2D layers (+ snow when detected) |
+| **Web/App** | Not yet |
 
-| Content | Runtime |
-|---------|---------|
-| **Video** wallpapers (`type: video`, `.mp4`) | **mpvpaper** per monitor |
-| **Scene** wallpapers (`scene.pkg`) | **linux-wallpaperengine** (full fidelity) |
-| Stop | Kills players and restores **walld** layer surfaces |
+System deps: **ffmpeg** (video decode), GPU/OpenGL ES. Steam WE for workshop files + optional assets.
 
-Workshop path scanned:
-
-`~/.local/share/Steam/steamapps/workshop/content/431960/`
-
-### Scene backend (required for .pkg)
+IPC:
 
 ```bash
-# Arch / CachyOS
-yay -S linux-wallpaperengine-git
-# binary should be on PATH or ~/.local/bin/linux-wallpaperengine
+walld ctl we '*' ~/.local/share/Steam/steamapps/workshop/content/431960/<id>
+walld ctl we_stop
 ```
 
-Assets are taken from the Steam install:
-
-`~/.local/share/Steam/steamapps/common/wallpaper_engine/assets`
-
-### Format crate
-
-`crates/wallengine-we` — `project.json`, **PKGV** unpack, TEX helpers, player orchestration.
 
 ## wallstudio (legacy note)
 

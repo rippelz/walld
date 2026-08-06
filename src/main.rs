@@ -9,7 +9,9 @@ mod config;
 mod image;
 mod ipc;
 mod render;
+mod video;
 mod wayland;
+mod we_runtime;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
@@ -65,6 +67,10 @@ struct Daemon {
     /// path → GPU texture for scene image layers.
     scene_tex: HashMap<PathBuf, Texture>,
     last_scene_tick: Instant,
+    /// Wallpaper Engine content owned by the engine (video / we-scene).
+    we_content: Option<we_runtime::WeContent>,
+    /// Uploaded textures for WE image layers (index into scene layers).
+    we_layer_tex: Vec<Option<Texture>>,
 }
 
 impl Daemon {
@@ -89,6 +95,8 @@ impl Daemon {
             scene_path: None,
             scene_tex: HashMap::new(),
             last_scene_tick: Instant::now(),
+            we_content: None,
+            we_layer_tex: Vec::new(),
         })
     }
 
@@ -227,6 +235,9 @@ impl Daemon {
 
     /// IPC `set`/`snap`/`wipe` — monitor is a name or "*".
     fn set_wallpaper(&mut self, monitor: &str, path: &std::path::Path, transition_override: Option<Transition>) {
+        if self.we_content.is_some() {
+            self.clear_we();
+        }
         // Classic image path exits engine scene mode.
         if self.scene.is_some() {
             self.clear_scene();
@@ -386,6 +397,9 @@ impl Daemon {
     /// Draw one output's current state (static frame or wipe at current time).
     /// Returns true if an animation is still running.
     fn draw_output(&mut self, out_id: wayland_client::backend::ObjectId) -> bool {
+        if self.we_content.is_some() {
+            return self.draw_we_on(out_id);
+        }
         // Engine scene mode takes priority over classic single-image wallpapers.
         if self.scene.is_some() {
             return self.draw_scene_on(out_id);
@@ -444,6 +458,16 @@ impl Daemon {
     fn tick_animations(&mut self) -> Option<Instant> {
         let mut next: Option<Instant> = None;
 
+        // WE video / animated content
+        if self.we_needs_anim() {
+            let ids: Vec<_> = self.outputs.keys().cloned().collect();
+            for id in ids {
+                let _ = self.draw_output(id);
+            }
+            let frame = Duration::from_secs_f32(1.0 / self.cfg.scene_fps.max(5) as f32);
+            next = Some(Instant::now() + frame);
+        }
+
         // Scene particle tick + redraw all outputs that have surfaces.
         if self.scene_needs_anim() {
             let dt = self.last_scene_tick.elapsed().as_secs_f32();
@@ -483,6 +507,13 @@ impl Daemon {
             IpcCmd::Ping => "ok pong".to_string(),
             IpcCmd::Status => {
                 let mut parts = vec!["ok".to_string()];
+                if let Some(we) = &self.we_content {
+                    parts.push(format!(
+                        "{}={} (active)",
+                        we.kind_tag(),
+                        we.title().replace(" ", "_")
+                    ));
+                }
                 if let Some(sc) = &self.scene {
                     let anim = if sc.is_animated() { "animated" } else { "static" };
                     parts.push(format!("scene={} ({anim})", sc.name()));
@@ -556,13 +587,13 @@ impl Daemon {
             }
             IpcCmd::Ready => {
                 // "ready" = every known output has a visible frame (or no outputs yet).
-                let has_scene = self.scene.is_some();
+                let has_content = self.scene.is_some() || self.we_content.is_some();
                 let waiting = self
                     .outputs
                     .values()
                     .filter(|o| {
                         !o.surface.as_ref().is_some_and(|s| s.committed)
-                            || (!has_scene && o.current.is_none() && o.wipe.is_none())
+                            || (!has_content && o.current.is_none() && o.wipe.is_none())
                     })
                     .count();
                 if waiting == 0 {
@@ -572,12 +603,31 @@ impl Daemon {
                 }
             }
             IpcCmd::Scene { monitor, path } => {
-                // monitor currently ignored (all outputs share one scene); kept for API.
                 let _ = monitor;
+                self.clear_we();
                 match self.load_scene(&path) {
                     Ok(()) => "ok scene".to_string(),
                     Err(e) => format!("err {e}"),
                 }
+            }
+            IpcCmd::We { monitor, path } => {
+                let _ = monitor;
+                match self.load_we_package(&path) {
+                    Ok(()) => format!(
+                        "ok we {}",
+                        self.we_content
+                            .as_ref()
+                            .map(|c| c.title())
+                            .unwrap_or("loaded")
+                    ),
+                    Err(e) => format!("err {e}"),
+                }
+            }
+            IpcCmd::WeStop => {
+                self.clear_we();
+                // restore classic config walls
+                self.reload(Some(Transition::Snap));
+                "ok we_stop".to_string()
             }
             IpcCmd::Quit => {
                 log::info!("quit requested via IPC");
@@ -763,6 +813,158 @@ impl Daemon {
         }
         self.scene_needs_anim()
     }
+
+    fn clear_we(&mut self) {
+        self.we_content = None;
+        for t in self.we_layer_tex.drain(..) {
+            if let Some(tex) = t {
+                self.renderer.delete_texture(tex.tex);
+            }
+        }
+    }
+
+    fn load_we_package(&mut self, path: &std::path::Path) -> Result<(), String> {
+        // Resolve workshop id path if needed
+        let dir = if path.is_dir() {
+            path.to_path_buf()
+        } else if path.is_file() && path.file_name().and_then(|s| s.to_str()) == Some("project.json") {
+            path.parent().unwrap().to_path_buf()
+        } else {
+            // bare workshop id
+            let id = path.to_string_lossy();
+            let cand = wallengine_we::workshop_dir().join(id.as_ref());
+            if cand.is_dir() {
+                cand
+            } else {
+                return Err(format!("not a WE wallpaper dir: {}", path.display()));
+            }
+        };
+        self.clear_we();
+        // leave classic scene mode
+        if self.scene.is_some() {
+            self.clear_scene();
+        }
+        let content = we_runtime::load_we_dir(&dir)?;
+        match &content {
+            we_runtime::WeContent::Video { title, path, .. } => {
+                log::info!("WE video «{title}» {}", path.display());
+            }
+            we_runtime::WeContent::Scene { title, layers, snow, .. } => {
+                log::info!("WE scene «{title}» layers={} snow={snow}", layers.len());
+            }
+        }
+        // upload layer textures for scene
+        self.we_layer_tex.clear();
+        if let we_runtime::WeContent::Scene { layers, snow, .. } = &content {
+            let snow = *snow;
+            let mut uploads = Vec::new();
+            for layer in layers {
+                if let Some((w, h, ref rgba)) = layer.rgba {
+                    let tex = self.renderer.upload_rgba(rgba, w, h);
+                    uploads.push(Some(Texture { tex, w, h }));
+                } else {
+                    uploads.push(None);
+                }
+            }
+            self.we_layer_tex = uploads;
+            // optional snow via native scene particles if snow
+            if snow {
+                // lightweight: keep drawing images; snow via particle system on top later
+            }
+        }
+        self.we_content = Some(content);
+        // mark paths for status
+        let ids: Vec<_> = self.outputs.keys().cloned().collect();
+        for id in ids {
+            if let Some(out) = self.outputs.get_mut(&id) {
+                out.current_path = Some(dir.clone());
+                out.pending_path = None;
+                if let Some(wipe) = out.wipe.take() {
+                    self.renderer.delete_texture(wipe.old.tex);
+                    self.renderer.delete_texture(wipe.new.tex);
+                }
+                if let Some(c) = out.current.take() {
+                    self.renderer.delete_texture(c.tex);
+                }
+            }
+            self.draw_output(id);
+        }
+        self.last_scene_tick = Instant::now();
+        Ok(())
+    }
+
+    fn we_needs_anim(&self) -> bool {
+        match &self.we_content {
+            Some(we_runtime::WeContent::Video { .. }) => true,
+            Some(we_runtime::WeContent::Scene { snow, .. }) => *snow,
+            None => false,
+        }
+    }
+
+    fn draw_we_on(&mut self, out_id: wayland_client::backend::ObjectId) -> bool {
+        let Some(out) = self.outputs.get(&out_id) else { return false };
+        let Some(s) = out.surface.as_ref() else { return false };
+        let Some(win) = s.egl_window.as_ref() else { return false };
+        if s.width == 0 || s.height == 0 {
+            return false;
+        }
+        let (vw, vh) = (s.width as i32, s.height as i32);
+        if self.renderer.attach_window(win).is_err() {
+            return false;
+        }
+        self.renderer.begin_frame(vw, vh, [0.0, 0.0, 0.0, 1.0]);
+
+        // Pull video frame if any
+        if let Some(we_runtime::WeContent::Video { decoder, .. }) = &self.we_content {
+            if let Some(frame) = decoder.try_frame() {
+                // re-upload to first we_layer_tex slot
+                if let Some(Some(old)) = self.we_layer_tex.first() {
+                    self.renderer.delete_texture(old.tex);
+                }
+                let tex = self.renderer.upload_rgba(&frame.rgba, frame.width, frame.height);
+                if self.we_layer_tex.is_empty() {
+                    self.we_layer_tex.push(Some(Texture {
+                        tex,
+                        w: frame.width,
+                        h: frame.height,
+                    }));
+                } else {
+                    self.we_layer_tex[0] = Some(Texture {
+                        tex,
+                        w: frame.width,
+                        h: frame.height,
+                    });
+                }
+            }
+        }
+
+        // Draw: for video single cover blit; for scene draw largest/base layer cover + others optional
+        if let Some(we_runtime::WeContent::Video { .. }) = &self.we_content {
+            if let Some(Some(tex)) = self.we_layer_tex.first() {
+                let (tt, tw, th) = (tex.tex, tex.w, tex.h);
+                self.renderer
+                    .draw_blit_layer(vw, vh, tt, tw, th, FitMode::Cover, 1.0);
+            }
+        } else if let Some(we_runtime::WeContent::Scene { snow, .. }) = &self.we_content {
+            // draw first decoded layer as cover fullscreen (background)
+            if let Some(tex) = self.we_layer_tex.iter().flatten().next() {
+                self.renderer
+                    .draw_blit_layer(vw, vh, tex.tex, tex.w, tex.h, FitMode::Cover, 1.0);
+            }
+            let _ = snow;
+        }
+
+        self.renderer.swap();
+        if let Some(out) = self.outputs.get_mut(&out_id) {
+            if let Some(s) = out.surface.as_mut() {
+                s.wl_surface.commit();
+                s.committed = true;
+            }
+        }
+        self.we_needs_anim()
+    }
+
+
 }
 
 // ── Wayland Dispatch impls ─────────────────────────────────────────────────
@@ -924,7 +1126,7 @@ fn main() {
     if args.len() >= 2 && args[1] == "ctl" {
         let line = args[2..].join(" ");
         if line.trim().is_empty() {
-            eprintln!("usage: walld ctl <ping|status|reload|set|snap|wipe|scene|preload|stop|start|ready|quit>");
+            eprintln!("usage: walld ctl <ping|status|reload|set|snap|wipe|scene|we|we_stop|preload|stop|start|ready|quit>");
             std::process::exit(2);
         }
         std::process::exit(ipc::client_call(&line));
@@ -1039,7 +1241,9 @@ fn main() {
 
     /// Arm the animation timer ~now if any wipe is in flight.
     fn arm_timer(daemon: &Daemon, timerfd: &TimerFd) {
-        let need = daemon.scene_needs_anim() || daemon.outputs.values().any(|o| o.wipe.is_some());
+        let need = daemon.scene_needs_anim()
+            || daemon.we_needs_anim()
+            || daemon.outputs.values().any(|o| o.wipe.is_some());
         if need {
             let _ = timerfd.set(
                 Expiration::OneShot(Duration::from_millis(1).into()),
