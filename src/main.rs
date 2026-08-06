@@ -71,6 +71,8 @@ struct Daemon {
     we_content: Option<we_runtime::WeContent>,
     /// Uploaded textures for WE image layers (index into scene layers).
     we_layer_tex: Vec<Option<Texture>>,
+    /// Wall-clock start for WE UV animation (not reset every frame).
+    we_started: Instant,
 }
 
 impl Daemon {
@@ -97,6 +99,7 @@ impl Daemon {
             last_scene_tick: Instant::now(),
             we_content: None,
             we_layer_tex: Vec::new(),
+            we_started: Instant::now(),
         })
     }
 
@@ -458,8 +461,16 @@ impl Daemon {
     fn tick_animations(&mut self) -> Option<Instant> {
         let mut next: Option<Instant> = None;
 
-        // WE video / animated content
+        // WE video / animated scene content
         if self.we_needs_anim() {
+            let dt = self.last_scene_tick.elapsed().as_secs_f32();
+            self.last_scene_tick = Instant::now();
+            if let Some(we_runtime::WeContent::Scene { particles, .. }) = self.we_content.as_mut()
+            {
+                for p in particles.iter_mut() {
+                    p.tick(dt);
+                }
+            }
             let ids: Vec<_> = self.outputs.keys().cloned().collect();
             for id in ids {
                 let _ = self.draw_output(id);
@@ -849,14 +860,23 @@ impl Daemon {
             we_runtime::WeContent::Video { title, path, .. } => {
                 log::info!("WE video «{title}» {}", path.display());
             }
-            we_runtime::WeContent::Scene { title, layers, snow, .. } => {
-                log::info!("WE scene «{title}» layers={} snow={snow}", layers.len());
+            we_runtime::WeContent::Scene {
+                title,
+                layers,
+                particles,
+                uv_animate,
+                ..
+            } => {
+                log::info!(
+                    "WE scene «{title}» layers={} particles={} uv_anim={uv_animate}",
+                    layers.len(),
+                    particles.len()
+                );
             }
         }
         // upload layer textures for scene
         self.we_layer_tex.clear();
-        if let we_runtime::WeContent::Scene { layers, snow, .. } = &content {
-            let snow = *snow;
+        if let we_runtime::WeContent::Scene { layers, .. } = &content {
             let mut uploads = Vec::new();
             for layer in layers {
                 if let Some((w, h, ref rgba)) = layer.rgba {
@@ -867,12 +887,9 @@ impl Daemon {
                 }
             }
             self.we_layer_tex = uploads;
-            // optional snow via native scene particles if snow
-            if snow {
-                // lightweight: keep drawing images; snow via particle system on top later
-            }
         }
         self.we_content = Some(content);
+        self.we_started = Instant::now();
         // mark paths for status
         let ids: Vec<_> = self.outputs.keys().cloned().collect();
         for id in ids {
@@ -896,7 +913,11 @@ impl Daemon {
     fn we_needs_anim(&self) -> bool {
         match &self.we_content {
             Some(we_runtime::WeContent::Video { .. }) => true,
-            Some(we_runtime::WeContent::Scene { snow, .. }) => *snow,
+            Some(we_runtime::WeContent::Scene {
+                particles,
+                uv_animate,
+                ..
+            }) => *uv_animate || !particles.is_empty(),
             None => false,
         }
     }
@@ -945,13 +966,40 @@ impl Daemon {
                 self.renderer
                     .draw_blit_layer(vw, vh, tt, tw, th, FitMode::Cover, 1.0);
             }
-        } else if let Some(we_runtime::WeContent::Scene { snow, .. }) = &self.we_content {
-            // draw first decoded layer as cover fullscreen (background)
+        } else if let Some(we_runtime::WeContent::Scene {
+            particles,
+            uv_animate,
+            ..
+        }) = &self.we_content
+        {
+            // UV motion for waterflow-like scenes
+            let off = if *uv_animate {
+                let t = self.we_started.elapsed().as_secs_f32();
+                // slow living motion for waterflow/scroll-style scenes
+                (
+                    (t * 0.25).sin() * 0.04 + (t * 0.07).sin() * 0.015,
+                    (t * 0.18).cos() * 0.03 + (t * 0.05).sin() * 0.01,
+                )
+            } else {
+                (0.0, 0.0)
+            };
             if let Some(tex) = self.we_layer_tex.iter().flatten().next() {
-                self.renderer
-                    .draw_blit_layer(vw, vh, tex.tex, tex.w, tex.h, FitMode::Cover, 1.0);
+                self.renderer.draw_blit_layer_offset(
+                    vw,
+                    vh,
+                    tex.tex,
+                    tex.w,
+                    tex.h,
+                    FitMode::Cover,
+                    1.0,
+                    off,
+                );
             }
-            let _ = snow;
+            // Draw all particle systems on top
+            for sys in particles {
+                self.renderer
+                    .draw_particles(vw, vh, &sys.particles, sys.opacity);
+            }
         }
 
         self.renderer.swap();

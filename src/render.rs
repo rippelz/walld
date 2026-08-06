@@ -19,6 +19,7 @@ pub struct Renderer {
     prog_wipe: glow::Program,
     u_tex: Option<glow::UniformLocation>,
     u_scale: Option<glow::UniformLocation>,
+    u_offset: Option<glow::UniformLocation>,
     u_old: Option<glow::UniformLocation>,
     u_new: Option<glow::UniformLocation>,
     u_old_scale: Option<glow::UniformLocation>,
@@ -52,11 +53,15 @@ const FRAG_BLIT: &str = concat!(
     // uScale = size of the texture window sampled across the screen (centered).
     // cover: both components <= 1 (crop overflow). contain: one may be > 1 (letterbox).
     "uniform vec2 uScale;\n",
+    "uniform vec2 uOffset;\n",
     "out vec4 fragColor;\n",
     "void main() {\n",
-    "    vec2 uv = 0.5 + (clamp(vUV, 0.0, 1.0) - 0.5) * uScale;\n",
-    "    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {\n",
-    "        fragColor = vec4(0.0, 0.0, 0.0, 1.0);\n", // contain letterbox
+    "    vec2 base = clamp(vUV, 0.0, 1.0);\n",
+    "    vec2 uv = 0.5 + (base - 0.5) * uScale + uOffset;\n",
+    "    bool moving = abs(uOffset.x) + abs(uOffset.y) > 0.00001;\n",
+    "    if (moving) { uv = fract(uv); }\n",
+    "    if (!moving && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) {\n",
+    "        fragColor = vec4(0.0, 0.0, 0.0, 1.0);\n",
     "    } else {\n",
     "        fragColor = vec4(texture(uTex, uv).rgb, 1.0);\n",
     "    }\n",
@@ -212,6 +217,7 @@ impl Renderer {
             surface,
             u_tex: u(prog_blit, "uTex"),
             u_scale: u(prog_blit, "uScale"),
+            u_offset: u(prog_blit, "uOffset"),
             u_old: u(prog_wipe, "uOld"),
             u_new: u(prog_wipe, "uNew"),
             u_old_scale: u(prog_wipe, "uOldScale"),
@@ -315,6 +321,20 @@ impl Renderer {
         fit: crate::config::FitMode,
         opacity: f32,
     ) {
+        self.draw_blit_layer_offset(vw, vh, tex, img_w, img_h, fit, opacity, (0.0, 0.0));
+    }
+
+    pub fn draw_blit_layer_offset(
+        &self,
+        vw: i32,
+        vh: i32,
+        tex: glow::Texture,
+        img_w: u32,
+        img_h: u32,
+        fit: crate::config::FitMode,
+        opacity: f32,
+        uv_offset: (f32, f32),
+    ) {
         let gl = &self.gl;
         let opacity = opacity.clamp(0.0, 1.0);
         unsafe {
@@ -325,9 +345,7 @@ impl Renderer {
             gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             let (sx, sy) = fit_uv_scale(vw, vh, img_w, img_h, fit);
             gl.uniform_2_f32(self.u_scale.as_ref(), sx, sy);
-            // opacity via constant color multiply — blit shader outputs alpha 1;
-            // approximate with blend color if needed. For now full opacity draw
-            // when opacity ~1; otherwise we still draw opaque (TODO uniform).
+            gl.uniform_2_f32(self.u_offset.as_ref(), uv_offset.0, uv_offset.1);
             let _ = opacity;
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_texture(glow::TEXTURE_2D, None);

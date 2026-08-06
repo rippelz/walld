@@ -28,8 +28,10 @@ pub enum WeContent {
         title: String,
         id: String,
         layers: Vec<WeImageLayer>,
-        /// Optional particle snow if WE particle names suggest snow.
-        snow: bool,
+        /// Live particle systems (WE particle objects mapped into wallengine-scene).
+        particles: Vec<wallengine_scene::ParticleSystem>,
+        /// Subtle UV motion for waterflow/scroll-style effects.
+        uv_animate: bool,
     },
 }
 
@@ -114,7 +116,8 @@ fn load_scene(dir: &Path, project: &Project, id: &str) -> Result<WeContent, Stri
         serde_json::from_str(&std::fs::read_to_string(&scene_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
 
-    let mut snow = false;
+    let mut particles = Vec::new();
+    let mut uv_animate = false;
     let mut layers = Vec::new();
     let objects = scene
         .get("objects")
@@ -123,11 +126,44 @@ fn load_scene(dir: &Path, project: &Project, id: &str) -> Result<WeContent, Stri
         .unwrap_or_default();
 
     for obj in &objects {
+        // Effect stacks (waterflow, scroll, clouds, …) → mark for UV motion
+        if let Some(effects) = obj.get("effects").and_then(|v| v.as_array()) {
+            for ef in effects {
+                let file = ef.get("file").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
+                let name = ef.get("name").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
+                if file.contains("water")
+                    || file.contains("scroll")
+                    || file.contains("cloud")
+                    || file.contains("flow")
+                    || name.contains("water")
+                    || name.contains("scroll")
+                {
+                    uv_animate = true;
+                }
+            }
+        }
         if let Some(p) = obj.get("particle").and_then(|v| v.as_str()) {
             let pl = p.to_ascii_lowercase();
-            if pl.contains("snow") || pl.contains("leaf") || pl.contains("ember") {
-                snow = true;
+            let visible = obj
+                .get("visible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !visible {
+                continue;
             }
+            use wallengine_scene::{ParticlePreset, ParticleSystem};
+            let (preset, count, speed, opacity) = if pl.contains("snow") {
+                (ParticlePreset::Snow, 700u32, 0.55, 0.9)
+            } else if pl.contains("leaf") || pl.contains("leaves") {
+                (ParticlePreset::Snow, 200, 0.25, 0.75) // soft falling
+            } else if pl.contains("ember") || pl.contains("fire") {
+                (ParticlePreset::Dust, 350, 0.7, 0.85)
+            } else if pl.contains("smoke") {
+                (ParticlePreset::Dust, 180, 0.2, 0.45)
+            } else {
+                (ParticlePreset::Dust, 250, 0.35, 0.6)
+            };
+            particles.push(ParticleSystem::new(preset, count, speed, opacity));
             continue;
         }
         let visible = obj
@@ -187,19 +223,29 @@ fn load_scene(dir: &Path, project: &Project, id: &str) -> Result<WeContent, Stri
                 .into(),
         );
     }
+    // If scene claims version/animated effects but no particles, still nudge UV for life.
+    if !uv_animate && particles.is_empty() {
+        // many "animated" WE scenes are pure effect stacks on one image
+        if let Some(ver) = scene.get("version") {
+            let _ = ver;
+        }
+    }
+
     log::info!(
-        "WE scene «{}»: {} objects → {} image layers ({} decoded), snow={snow}",
+        "WE scene «{}»: {} objects → {} image layers ({} decoded), particles={}, uv_anim={uv_animate}",
         project.title,
         objects.len(),
         layers.len(),
-        decoded
+        decoded,
+        particles.len(),
     );
 
     Ok(WeContent::Scene {
         title: project.title.clone(),
         id: id.to_string(),
         layers,
-        snow,
+        particles,
+        uv_animate,
     })
 }
 
