@@ -62,7 +62,7 @@ pub fn stop_all() {
         kids.clear();
     }
     // also kill stragglers by name
-    let _ = Command::new("pkill").args(["-x", "linux-wallpaperengine"]).status();
+    let _ = Command::new("pkill").args(["-f", "linux-wallpaperengine"]).status();
     let _ = Command::new("pkill").args(["-x", "mpvpaper"]).status();
     // restore walld surfaces if daemon is up
     let walld = walld_binary();
@@ -245,7 +245,7 @@ pub fn discover_monitors() -> Vec<String> {
 pub fn status_snapshot() -> RuntimeStatus {
     let (lwe, mpv) = detect_backends();
     let playing = Command::new("pgrep")
-        .args(["-x", "linux-wallpaperengine"])
+        .args(["-f", "linux-wallpaperengine"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -255,7 +255,7 @@ pub fn status_snapshot() -> RuntimeStatus {
             .map(|s| s.success())
             .unwrap_or(false);
     let backend = if Command::new("pgrep")
-        .args(["-x", "linux-wallpaperengine"])
+        .args(["-f", "linux-wallpaperengine"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
