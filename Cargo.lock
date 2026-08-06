@@ -4018,12 +4018,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "wallstudio"
+name = "wallengine-we"
 version = "0.1.0"
+dependencies = [
+ "image",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "wallstudio"
+version = "0.2.0"
 dependencies = [
  "iced",
  "serde_json",
  "wallengine-scene",
+ "wallengine-we",
 ]
 
 [[package]]

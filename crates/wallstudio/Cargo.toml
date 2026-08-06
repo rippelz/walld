@@ -1,8 +1,8 @@
 [package]
 name = "wallstudio"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Wallpaper Engine–style gallery for the walld engine"
+description = "Wallpaper Engine for Hyprland — library browser + player"
 license = "MIT"
 
 [[bin]]
@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 iced = { version = "0.14", features = ["tokio", "image"] }
+wallengine-we = { path = "../wallengine-we" }
 wallengine-scene = { path = "../wallengine-scene" }
 serde_json = "1"

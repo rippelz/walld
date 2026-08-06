@@ -36,7 +36,46 @@ scene_fps = 30
 
 Classic `hyprpaper.conf` image mode still works when `scene` is unset.
 
-## wallstudio (iced gallery)
+
+## wallstudio — Wallpaper Engine on Hyprland
+
+**wallstudio is built around your Steam Wallpaper Engine library**, not as a side panel.
+
+```bash
+cargo build -p wallstudio --release
+install -Dm755 target/release/wallstudio ~/.local/bin/wallstudio
+wallstudio
+```
+
+### What it does
+
+| Content | Runtime |
+|---------|---------|
+| **Video** wallpapers (`type: video`, `.mp4`) | **mpvpaper** per monitor |
+| **Scene** wallpapers (`scene.pkg`) | **linux-wallpaperengine** (full fidelity) |
+| Stop | Kills players and restores **walld** layer surfaces |
+
+Workshop path scanned:
+
+`~/.local/share/Steam/steamapps/workshop/content/431960/`
+
+### Scene backend (required for .pkg)
+
+```bash
+# Arch / CachyOS
+yay -S linux-wallpaperengine-git
+# binary should be on PATH or ~/.local/bin/linux-wallpaperengine
+```
+
+Assets are taken from the Steam install:
+
+`~/.local/share/Steam/steamapps/common/wallpaper_engine/assets`
+
+### Format crate
+
+`crates/wallengine-we` — `project.json`, **PKGV** unpack, TEX helpers, player orchestration.
+
+## wallstudio (legacy note)
 
 ```bash
 cargo build -p wallstudio --release
