@@ -2,7 +2,7 @@
 name = "wallstudio"
 version = "0.1.0"
 edition = "2021"
-description = "iced gallery / control app for the walld wallpaper engine"
+description = "Wallpaper Engine–style gallery for the walld engine"
 license = "MIT"
 
 [[bin]]
@@ -10,6 +10,6 @@ name = "wallstudio"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "image"] }
 wallengine-scene = { path = "../wallengine-scene" }
 serde_json = "1"
