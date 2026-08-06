@@ -17,7 +17,8 @@ wayland-egl = "0.32"
 khronos-egl = { version = "6", features = ["static"] }
 glow = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-calloop = { version = "0.13", default-features = false, features = ["signals"] }
+calloop = { version = "0.14", default-features = false, features = ["signals"] }
+calloop-wayland-source = "0.4"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["humantime", "auto-color"] }
 thiserror = "1"

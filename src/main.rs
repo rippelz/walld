@@ -22,6 +22,7 @@ use calloop::channel::{self, Channel};
 use calloop::generic::{FdWrapper, Generic};
 use calloop::signals::{Event as SignalEvent, Signal, Signals};
 use calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction};
+use calloop_wayland_source::WaylandSource;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{wl_compositor, wl_output, wl_registry, wl_surface};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
@@ -39,6 +40,8 @@ struct DecodeResp {
 
 struct Daemon {
     cfg: WalldConfig,
+    /// Kept so the Wayland connection outlives EGL surfaces; reads go via WaylandSource.
+    #[allow(dead_code)]
     conn: Connection,
     qh: QueueHandle<Daemon>,
     compositor: Option<wl_compositor::WlCompositor>,
@@ -739,7 +742,7 @@ fn main() {
     let loop_signal = event_loop.get_signal();
     let handle = event_loop.handle();
 
-    let mut daemon = Daemon::new(cfg, conn, queue.handle(), decode_tx).expect("init EGL/renderer");
+    let mut daemon = Daemon::new(cfg, conn.clone(), queue.handle(), decode_tx).expect("init EGL/renderer");
     daemon.loop_signal = Some(loop_signal);
 
     // Bind globals that already exist (registry_queue_init's roundtrip filled the list).
@@ -750,13 +753,24 @@ fn main() {
             daemon.bind_global(&registry, g.name, &g.interface, g.version);
         }
     }
-    // Get the bind requests out now — output events can't arrive before this.
-    daemon.conn.flush().expect("flush initial binds");
+    // Flush + roundtrip so wl_output name/mode/done arrive before we load walls.
+    // Without this, outputs sit nameless and config never applies.
+    if let Err(e) = queue.roundtrip(&mut daemon) {
+        log::error!("initial wayland roundtrip failed: {e}");
+        std::process::exit(1);
+    }
 
     // Animation timer (deadline-driven timerfd; armed whenever a wipe runs).
     use nix::sys::timerfd::{ClockId, Expiration, TimerFd, TimerFlags, TimerSetTimeFlags};
     use std::rc::Rc;
-    let timerfd = Rc::new(TimerFd::new(ClockId::CLOCK_MONOTONIC, TimerFlags::empty()).expect("timerfd_create"));
+    // Non-blocking: Level-triggered timerfd must not block the event loop.
+    let timerfd = Rc::new(
+        TimerFd::new(
+            ClockId::CLOCK_MONOTONIC,
+            TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
+        )
+        .expect("timerfd_create"),
+    );
     let timer_raw_fd = timerfd.as_fd().as_raw_fd();
     // SAFETY: the timerfd outlives the event loop (Rc held by the callbacks).
     let timer_source = Generic::new(unsafe { FdWrapper::new(timer_raw_fd) }, Interest::READ, Mode::Level);
@@ -764,12 +778,18 @@ fn main() {
         .insert_source(timer_source, {
             let timerfd = timerfd.clone();
             move |_readiness, io_obj, state| {
-                // Clear the expiration.
+                // Clear the expiration (may be multi-fire; drain fully).
                 let mut buf = [0u8; 8];
-                let _ = nix::unistd::read(io_obj.as_raw_fd(), &mut buf);
+                loop {
+                    match nix::unistd::read(io_obj.as_raw_fd(), &mut buf) {
+                        Ok(0) | Err(nix::errno::Errno::EAGAIN) => break,
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    }
+                }
                 match state.tick_animations() {
                     Some(next) => {
-                        let dur = next.saturating_duration_since(Instant::now());
+                        let dur = next.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
                         let _ = timerfd.set(Expiration::OneShot(dur.into()), TimerSetTimeFlags::empty());
                     }
                     None => {
@@ -784,41 +804,19 @@ fn main() {
     /// Arm the animation timer ~now if any wipe is in flight.
     fn arm_timer(daemon: &Daemon, timerfd: &TimerFd) {
         if daemon.outputs.values().any(|o| o.wipe.is_some()) {
-            let _ = timerfd.set(Expiration::OneShot(Duration::from_millis(1).into()), TimerSetTimeFlags::empty());
+            let _ = timerfd.set(
+                Expiration::OneShot(Duration::from_millis(1).into()),
+                TimerSetTimeFlags::empty(),
+            );
         }
     }
 
-    // Wayland fd → calloop (read + dispatch everything pending, non-blocking).
-    let wl_fd = daemon.conn.backend().poll_fd().as_raw_fd();
-    // SAFETY: the connection outlives the event loop (owned by Daemon).
-    let wl_source = Generic::new(unsafe { FdWrapper::new(wl_fd) }, Interest::READ, Mode::Level);
-    handle
-        .insert_source(wl_source, move |_readiness, _io, state| {
-            loop {
-                match state.conn.prepare_read() {
-                    None => break,
-                    Some(guard) => match guard.read() {
-                        Ok(_) => {}
-                        Err(wayland_client::backend::WaylandError::Io(e))
-                            if e.kind() == std::io::ErrorKind::WouldBlock =>
-                        {
-                            break
-                        }
-                        Err(e) => {
-                            log::error!("wayland read failed: {e}");
-                            state.running = false;
-                            break;
-                        }
-                    },
-                }
-            }
-            if let Err(e) = queue.dispatch_pending(state) {
-                log::error!("wayland dispatch failed: {e}");
-                state.running = false;
-            }
-            let _ = state.conn.flush();
-            Ok(PostAction::Continue)
-        })
+    // Wayland socket: use Smithay's adapter. The previous hand-rolled Level +
+    // prepare_read loop busy-spun under the libwayland (client_system) backend
+    // that wayland-egl requires — it never drained correctly, so IPC hung and
+    // outputs never received name/mode events.
+    WaylandSource::new(conn, queue)
+        .insert(handle.clone())
         .expect("insert wayland source");
 
     // Decode results.
@@ -833,7 +831,6 @@ fn main() {
             }
         })
         .expect("insert decode channel");
-
 
     // IPC socket.
     match ipc::IpcServer::start(&handle, {
@@ -857,22 +854,22 @@ fn main() {
             {
                 let timerfd = timerfd.clone();
                 move |ev: SignalEvent, (), state| {
-                match ev.signal() {
-                    Signal::SIGHUP => {
-                        log::info!("SIGHUP: reloading config");
-                        state.reload(None);
-                        arm_timer(state, &timerfd);
-                    }
-                    Signal::SIGTERM | Signal::SIGINT => {
-                        log::info!("terminating");
-                        state.running = false;
-                        if let Some(s) = &state.loop_signal {
-                            s.stop();
+                    match ev.signal() {
+                        Signal::SIGHUP => {
+                            log::info!("SIGHUP: reloading config");
+                            state.reload(None);
+                            arm_timer(state, &timerfd);
                         }
+                        Signal::SIGTERM | Signal::SIGINT => {
+                            log::info!("terminating");
+                            state.running = false;
+                            if let Some(s) = &state.loop_signal {
+                                s.stop();
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
             },
         )
         .expect("insert signal source");
