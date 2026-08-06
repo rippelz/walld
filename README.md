@@ -36,6 +36,16 @@ scene_fps = 30
 
 Classic `hyprpaper.conf` image mode still works when `scene` is unset.
 
+## wallstudio (iced gallery)
+
+```bash
+cargo build -p wallstudio --release
+install -Dm755 target/release/wallstudio ~/.local/bin/wallstudio
+wallstudio   # gallery + apply scenes via walld IPC
+```
+
+Lists `~/.local/share/wallengine/scenes/*`, shows daemon status, Apply → `walld ctl scene`.
+
 ## Build / install
 
 ```bash

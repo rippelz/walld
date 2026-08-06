@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/wallengine-scene"]
+members = [".", "crates/wallengine-scene", "crates/wallstudio"]
 resolver = "2"
 
 [package]
