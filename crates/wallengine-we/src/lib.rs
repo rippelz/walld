@@ -13,6 +13,6 @@ pub use project::{Project, WallpaperType};
 pub use tex::{TexError, decode_tex_to_rgba};
 pub use scan::{WeEntry, WeSource, format_size, scan_all};
 pub use player::{
-    PlayBackend, PlayRequest, PlayerError, RuntimeStatus, detect_backends, discover_monitors, play,
+    PlayBackend, PlayRequest, PlayerError, RuntimeStatus, detect_backends, discover_monitors, discover_monitors_info, MonitorInfo, play,
     status_snapshot, stop_all,
 };

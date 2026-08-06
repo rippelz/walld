@@ -148,7 +148,29 @@ fn ensure_walld(bin: &std::path::Path) -> Result<(), PlayerError> {
     Err(PlayerError::Msg("walld failed to start".into()))
 }
 
-pub fn discover_monitors() -> Vec<String> {
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MonitorInfo {
+    pub fn label(&self) -> String {
+        format!("{}  {}×{}", self.name, self.width, self.height)
+    }
+
+    /// Aspect ratio for tiny display glyph (width/height).
+    pub fn aspect(&self) -> f32 {
+        if self.height == 0 {
+            16.0 / 9.0
+        } else {
+            self.width as f32 / self.height as f32
+        }
+    }
+}
+
+pub fn discover_monitors_info() -> Vec<MonitorInfo> {
     let out = Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
@@ -162,10 +184,23 @@ pub fn discover_monitors() -> Vec<String> {
     v.as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|m| m.get("name")?.as_str().map(|s| s.to_string()))
+                .filter_map(|m| {
+                    Some(MonitorInfo {
+                        name: m.get("name")?.as_str()?.to_string(),
+                        width: m.get("width")?.as_u64()? as u32,
+                        height: m.get("height")?.as_u64()? as u32,
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+pub fn discover_monitors() -> Vec<String> {
+    discover_monitors_info()
+        .into_iter()
+        .map(|m| m.name)
+        .collect()
 }
 
 pub fn detect_backends() -> (bool, bool) {

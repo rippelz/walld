@@ -6,8 +6,8 @@ mod ui;
 use iced::{Subscription, Task, Theme};
 use std::time::Duration;
 use wallengine_we::{
-    discover_monitors, play as we_play, scan_all, status_snapshot, stop_all, PlayRequest,
-    RuntimeStatus, WallpaperType, WeEntry, WeSource,
+    discover_monitors_info, play as we_play, scan_all, status_snapshot, stop_all, MonitorInfo,
+    PlayRequest, RuntimeStatus, WallpaperType, WeEntry, WeSource,
 };
 use wallengine_we as we;
 
@@ -28,7 +28,7 @@ pub struct App {
     pub filter_source_workshop: bool,
     pub filter_source_local: bool,
     pub sort_newest: bool,
-    pub monitors: Vec<String>,
+    pub monitors: Vec<MonitorInfo>,
     /// empty = all
     pub monitor: String,
     pub silent: bool,
@@ -74,7 +74,7 @@ impl App {
             filter_source_workshop: true,
             filter_source_local: true,
             sort_newest: true,
-            monitors: discover_monitors(),
+            monitors: discover_monitors_info(),
             monitor: String::new(),
             silent: true,
             runtime: status_snapshot(),
@@ -99,11 +99,17 @@ impl App {
         use iced::keyboard;
         Subscription::batch([
             iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
-            event::listen_with(|event, _s, _id| match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                    Some(Message::Key(key, modifiers))
+            event::listen_with(|event, status, _id| {
+                // Don't steal keys while a text input (or other widget) is focused.
+                if status == iced::event::Status::Captured {
+                    return None;
                 }
-                _ => None,
+                match event {
+                    iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                        Some(Message::Key(key, modifiers))
+                    }
+                    _ => None,
+                }
             }),
         ])
     }
@@ -165,7 +171,7 @@ impl App {
 
     fn reload(&mut self) {
         self.entries = scan_all();
-        self.monitors = discover_monitors();
+        self.monitors = discover_monitors_info();
         self.runtime = status_snapshot();
         if self.cursor >= self.entries.len() && !self.entries.is_empty() {
             self.cursor = self.entries.len() - 1;

@@ -24,7 +24,7 @@ mod pal {
     pub const ACCENT: Color = Color::from_rgb(0.86, 0.72, 0.48);
     pub const OK: Color = Color::from_rgb(0.55, 0.72, 0.50);
     pub const ERR: Color = Color::from_rgb(0.82, 0.38, 0.35);
-    pub const SIDE: f32 = 200.0;
+    pub const SIDE: f32 = 220.0;
     pub const DETAIL: f32 = 320.0;
     pub const THUMB_W: f32 = 176.0;
     pub const THUMB_H: f32 = 110.0;
@@ -65,25 +65,16 @@ fn top(app: &App) -> Element<'_, Message> {
     let brand = row![
         text("WALL").size(16).color(pal::FG).font(Font::MONOSPACE),
         text("STUDIO").size(16).color(pal::ACCENT).font(Font::MONOSPACE),
-        Space::new().width(10),
-        text("Wallpaper Engine")
-            .size(12)
-            .color(pal::MUTE)
-            .font(Font::MONOSPACE),
     ]
     .align_y(Alignment::Center);
 
-    let mut mons = row![chip("All", app.monitor.is_empty(), Message::SetMonitor(String::new()))].spacing(4);
-    for m in &app.monitors {
-        mons = mons.push(chip(m, app.monitor == *m, Message::SetMonitor(m.clone())));
-    }
-
-    let search = text_input("Search workshop…", &app.filter)
+    // Library filter — installed/subscribed content, not remote Steam Workshop API
+    let search = text_input("Filter installed…", &app.filter)
         .on_input(Message::FilterChanged)
         .on_submit(Message::Apply)
         .padding(8)
         .size(13)
-        .width(Length::Fixed(240.0))
+        .width(Length::Fixed(260.0))
         .style(search_style);
 
     let be = text(if app.runtime.engine_ready {
@@ -92,23 +83,28 @@ fn top(app: &App) -> Element<'_, Message> {
         "ENGINE  offline"
     })
     .size(11)
-    .color(if app.runtime.engine_ready { pal::OK } else { pal::ERR })
+    .color(if app.runtime.engine_ready {
+        pal::OK
+    } else {
+        pal::ERR
+    })
     .font(Font::MONOSPACE);
 
     container(
         row![
             brand,
             Space::new().width(16),
-            text("Monitor").size(11).color(pal::MUTE).font(Font::MONOSPACE),
-            Space::new().width(6),
-            mons,
+            text("Installed library")
+                .size(11)
+                .color(pal::MUTE)
+                .font(Font::MONOSPACE),
             Space::new().width(Fill),
             search,
             Space::new().width(8),
             flat("Refresh", Message::Refresh),
             Space::new().width(4),
             flat("Stop", Message::Stop),
-            Space::new().width(10),
+            Space::new().width(12),
             be,
         ]
         .align_y(Alignment::Center)
@@ -121,13 +117,16 @@ fn top(app: &App) -> Element<'_, Message> {
 
 fn sidebar(app: &App) -> Element<'_, Message> {
     column![
+        label("DISPLAY"),
+        display_picker(app),
+        Space::new().height(8),
         label("TYPE"),
         filter_btn("All", app.filter_type == TypeFilter::All, Message::SetTypeFilter(TypeFilter::All)),
         filter_btn("Scene (.pkg)", app.filter_type == TypeFilter::Scene, Message::SetTypeFilter(TypeFilter::Scene)),
         filter_btn("Video", app.filter_type == TypeFilter::Video, Message::SetTypeFilter(TypeFilter::Video)),
         Space::new().height(12),
         label("SOURCE"),
-        filter_btn("Workshop", app.filter_source_workshop, Message::ToggleWorkshop),
+        filter_btn("Steam (subscribed)", app.filter_source_workshop, Message::ToggleWorkshop),
         filter_btn("My projects", app.filter_source_local, Message::ToggleLocal),
         Space::new().height(12),
         label("OPTIONS"),
@@ -172,7 +171,7 @@ fn gallery(app: &App) -> Element<'_, Message> {
         return container(
             column![
                 text("No wallpapers found").size(18).color(pal::DIM),
-                text("Subscribe in Steam Wallpaper Engine, then Refresh.")
+                text("Subscribe to wallpapers in Steam, then Refresh.")
                     .size(13)
                     .color(pal::MUTE),
                 text(wallengine_we::workshop_dir().display().to_string())
@@ -195,20 +194,33 @@ fn gallery(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    let mut rows = column![].spacing(12).width(Fill);
+    let mut rows = column![].spacing(18).width(Fill);
     for chunk in vis.chunks(cols) {
-        let mut r = row![].spacing(12);
+        let mut r = row![].spacing(18);
         for &idx in chunk {
             r = r.push(tile(app, idx));
         }
         for _ in chunk.len()..cols {
-            r = r.push(Space::new().width(Length::Fixed(pal::THUMB_W)));
+            r = r.push(
+                Space::new()
+                    .width(Length::Fixed(pal::THUMB_W + 8.0))
+                    .height(Length::Fixed(pal::THUMB_H + 48.0)),
+            );
         }
         rows = rows.push(r);
     }
-    scrollable(container(rows).padding(14).width(Fill))
-        .height(Fill)
-        .into()
+    scrollable(
+        container(rows)
+            .padding(Padding {
+                top: 16.0,
+                right: 16.0,
+                bottom: 24.0,
+                left: 16.0,
+            })
+            .width(Fill),
+    )
+    .height(Fill)
+    .into()
 }
 
 fn tile(app: &App, idx: usize) -> Element<'_, Message> {
@@ -216,15 +228,6 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
     let selected = idx == app.cursor;
     let playing = app.runtime.playing
         && (app.runtime.title == e.id || app.runtime.detail.contains(&e.id));
-
-    let ring = if selected {
-        pal::ACCENT
-    } else if playing {
-        pal::OK
-    } else {
-        pal::LINE
-    };
-    let rw = if selected || playing { 2.0 } else { 1.0 };
 
     let preview: Element<'_, Message> = if let Some(ref p) = e.preview {
         container(
@@ -251,19 +254,20 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
         .into()
     };
 
-    let media = container(preview).style(move |_| container::Style {
+    let media = container(preview).style(|_| container::Style {
         background: Some(Background::Color(pal::PANEL2)),
         border: Border {
-            color: ring,
-            width: rw,
+            color: pal::LINE,
+            width: 1.0,
             radius: 0.0.into(),
         },
         ..Default::default()
     });
 
     let ty = e.project.wallpaper_type.as_label();
+    let title = truncate_chars(&e.project.title, 28);
     let caption = column![
-        text(&e.project.title)
+        text(title)
             .size(12)
             .color(if selected { pal::FG } else { pal::DIM }),
         row![
@@ -281,14 +285,39 @@ fn tile(app: &App, idx: usize) -> Element<'_, Message> {
         ],
     ]
     .spacing(3)
+    .width(Length::Fixed(pal::THUMB_W))
     .padding(Padding {
-        top: 6.0,
-        right: 2.0,
-        bottom: 0.0,
-        left: 2.0,
+        top: 8.0,
+        right: 4.0,
+        bottom: 2.0,
+        left: 4.0,
     });
 
-    mouse_area(column![media, caption].width(Length::Fixed(pal::THUMB_W)))
+    // Outer pad so selection ring never collides with neighbors
+    let cell = container(column![media, caption].spacing(0))
+        .width(Length::Fixed(pal::THUMB_W + 8.0))
+        .padding(4)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if selected {
+                Color::from_rgb(0.12, 0.11, 0.09)
+            } else {
+                Color::TRANSPARENT
+            })),
+            border: Border {
+                color: if selected {
+                    pal::ACCENT
+                } else if playing {
+                    pal::OK
+                } else {
+                    Color::TRANSPARENT
+                },
+                width: if selected || playing { 1.5 } else { 0.0 },
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        });
+
+    mouse_area(cell)
         .on_press(Message::Select(idx))
         .on_double_click(Message::Apply)
         .into()
@@ -478,6 +507,130 @@ fn label_inline(k: &str, v: &str) -> Element<'static, Message> {
     .into()
 }
 
+
+/// Wallpaper Engine–style display chooser: aspect glyphs + name/resolution.
+fn display_picker(app: &App) -> Element<'_, Message> {
+    let mut col = column![].spacing(6).padding(Padding {
+        top: 0.0,
+        right: 10.0,
+        bottom: 0.0,
+        left: 10.0,
+    });
+
+    col = col.push(display_row(
+        "All displays",
+        None,
+        app.monitor.is_empty(),
+        Message::SetMonitor(String::new()),
+        1.6,
+    ));
+
+    for m in &app.monitors {
+        let selected = app.monitor == m.name;
+        col = col.push(display_row(
+            &m.name,
+            Some((m.width, m.height)),
+            selected,
+            Message::SetMonitor(m.name.clone()),
+            m.aspect(),
+        ));
+    }
+
+    col.into()
+}
+
+fn display_row<'a>(
+    name: &'a str,
+    res: Option<(u32, u32)>,
+    on: bool,
+    msg: Message,
+    aspect: f32,
+) -> Element<'a, Message> {
+    let glyph_w = 36.0_f32;
+    let glyph_h = (glyph_w / aspect.max(0.5)).clamp(14.0, 28.0);
+    let glyph = container(Space::new().width(Length::Fixed(glyph_w - 4.0)).height(Length::Fixed(glyph_h - 4.0)))
+        .width(Length::Fixed(glyph_w))
+        .height(Length::Fixed(glyph_h))
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if on {
+                Color::from_rgb(0.20, 0.17, 0.12)
+            } else {
+                pal::PANEL2
+            })),
+            border: Border {
+                color: if on { pal::ACCENT } else { pal::LINE },
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        });
+
+    let sub = match res {
+        Some((w, h)) => format!("{w}×{h}"),
+        None => "span every output".into(),
+    };
+
+    button(
+        row![
+            glyph,
+            Space::new().width(10),
+            column![
+                text(name)
+                    .size(12)
+                    .color(if on { pal::FG } else { pal::DIM }),
+                text(sub)
+                    .size(10)
+                    .color(pal::MUTE)
+                    .font(Font::MONOSPACE),
+            ]
+            .spacing(2)
+            .width(Fill),
+            if on {
+                text("✓").size(12).color(pal::ACCENT).font(Font::MONOSPACE)
+            } else {
+                text(" ").size(12)
+            },
+        ]
+        .align_y(Alignment::Center)
+        .padding(Padding::from([6, 4])),
+    )
+    .on_press(msg)
+    .padding(0)
+    .width(Fill)
+    .style(move |_t, status| {
+        let bg = if on {
+            Color::from_rgb(0.12, 0.11, 0.09)
+        } else if matches!(status, button::Status::Hovered) {
+            pal::PANEL2
+        } else {
+            Color::TRANSPARENT
+        };
+        button::Style {
+            background: Some(Background::Color(bg)),
+            border: Border {
+                color: if on { pal::ACCENT } else { Color::TRANSPARENT },
+                width: if on { 1.0 } else { 0.0 },
+                radius: 0.0.into(),
+            },
+            text_color: pal::FG,
+            shadow: Default::default(),
+            snap: true,
+        }
+    })
+    .into()
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
+
 fn filter_btn(label: &str, on: bool, msg: Message) -> Element<'_, Message> {
     let mark = if on { "▣" } else { "□" };
     button(
@@ -518,33 +671,6 @@ fn filter_btn(label: &str, on: bool, msg: Message) -> Element<'_, Message> {
         }
     })
     .into()
-}
-
-fn chip(label: &str, on: bool, msg: Message) -> Element<'_, Message> {
-    button(text(label).size(11).font(Font::MONOSPACE))
-        .on_press(msg)
-        .padding(Padding::from([4, 8]))
-        .style(move |_t, status| {
-            let (bg, border, fg) = if on {
-                (Color::from_rgb(0.16, 0.14, 0.10), pal::ACCENT, pal::ACCENT)
-            } else if matches!(status, button::Status::Hovered) {
-                (pal::PANEL2, pal::LINE, pal::FG)
-            } else {
-                (Color::TRANSPARENT, pal::LINE, pal::DIM)
-            };
-            button::Style {
-                background: Some(Background::Color(bg)),
-                border: Border {
-                    color: border,
-                    width: 1.0,
-                    radius: 0.0.into(),
-                },
-                text_color: fg,
-                shadow: Default::default(),
-                snap: true,
-            }
-        })
-        .into()
 }
 
 fn flat(label: impl Into<String>, msg: Message) -> Element<'static, Message> {
