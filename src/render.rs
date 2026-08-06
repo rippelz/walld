@@ -21,6 +21,8 @@ pub struct Renderer {
     u_scale: Option<glow::UniformLocation>,
     u_old: Option<glow::UniformLocation>,
     u_new: Option<glow::UniformLocation>,
+    u_old_scale: Option<glow::UniformLocation>,
+    u_new_scale: Option<glow::UniformLocation>,
     u_progress: Option<glow::UniformLocation>,
     u_feather: Option<glow::UniformLocation>,
     u_size: Option<glow::UniformLocation>,
@@ -43,32 +45,47 @@ const FRAG_BLIT: &str = concat!(
     "precision highp float;\n",
     "in vec2 vUV;\n",
     "uniform sampler2D uTex;\n",
+    // uScale = size of the texture window sampled across the screen (centered).
+    // cover: both components <= 1 (crop overflow). contain: one may be > 1 (letterbox).
     "uniform vec2 uScale;\n",
     "out vec4 fragColor;\n",
     "void main() {\n",
     "    vec2 uv = 0.5 + (clamp(vUV, 0.0, 1.0) - 0.5) * uScale;\n",
-    "    fragColor = vec4(texture(uTex, uv).rgb, 1.0);\n",
+    "    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {\n",
+    "        fragColor = vec4(0.0, 0.0, 0.0, 1.0);\n", // contain letterbox
+    "    } else {\n",
+    "        fragColor = vec4(texture(uTex, uv).rgb, 1.0);\n",
+    "    }\n",
     "}\n"
 );
 
 /// Diagonal wipe metric (matches the patched hyprpaper):
 ///   m = ((1-x)*W + y*H)/(W+H)  — 0 at top-right, 1 at bottom-left.
 /// New wallpaper revealed where m <= progress, soft-feathered edge.
+/// Each texture uses its own cover/contain UV scale (uOldScale / uNewScale).
 const FRAG_WIPE: &str = concat!(
     "#version 300 es\n",
     "precision highp float;\n",
     "in vec2 vUV;\n",
     "uniform sampler2D uOld;\n",
     "uniform sampler2D uNew;\n",
+    "uniform vec2 uOldScale;\n",
+    "uniform vec2 uNewScale;\n",
     "uniform float uProgress;\n",
     "uniform float uFeather; // normalized by (W+H)\n",
     "uniform vec2  uSize;\n",
     "out vec4 fragColor;\n",
+    "vec4 sampleFit(sampler2D tex, vec2 scale, vec2 screenUv) {\n",
+    "    vec2 uv = 0.5 + (screenUv - 0.5) * scale;\n",
+    "    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)\n",
+    "        return vec4(0.0, 0.0, 0.0, 1.0);\n",
+    "    return vec4(texture(tex, uv).rgb, 1.0);\n",
+    "}\n",
     "void main() {\n",
-    "    vec2 uv = clamp(vUV, 0.0, 1.0);\n",
-    "    vec4 cOld = texture(uOld, uv);\n",
-    "    vec4 cNew = texture(uNew, uv);\n",
-    "    float m = ((1.0 - uv.x) * uSize.x + uv.y * uSize.y) / max(uSize.x + uSize.y, 1.0);\n",
+    "    vec2 screenUv = clamp(vUV, 0.0, 1.0);\n",
+    "    vec4 cOld = sampleFit(uOld, uOldScale, screenUv);\n",
+    "    vec4 cNew = sampleFit(uNew, uNewScale, screenUv);\n",
+    "    float m = ((1.0 - screenUv.x) * uSize.x + screenUv.y * uSize.y) / max(uSize.x + uSize.y, 1.0);\n",
     "    float f = max(uFeather, 0.0005);\n",
     "    float a = smoothstep(uProgress - f, uProgress + f, m);\n",
     "    fragColor = vec4(mix(cNew, cOld, a).rgb, 1.0);\n",
@@ -143,6 +160,8 @@ impl Renderer {
             u_scale: u(prog_blit, "uScale"),
             u_old: u(prog_wipe, "uOld"),
             u_new: u(prog_wipe, "uNew"),
+            u_old_scale: u(prog_wipe, "uOldScale"),
+            u_new_scale: u(prog_wipe, "uNewScale"),
             u_progress: u(prog_wipe, "uProgress"),
             u_feather: u(prog_wipe, "uFeather"),
             u_size: u(prog_wipe, "uSize"),
@@ -216,7 +235,7 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.uniform_1_i32(self.u_tex.as_ref(), 0);
-            let (sx, sy) = cover_scale(vw, vh, img_w, img_h, fit);
+            let (sx, sy) = fit_uv_scale(vw, vh, img_w, img_h, fit);
             gl.uniform_2_f32(self.u_scale.as_ref(), sx, sy);
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_texture(glow::TEXTURE_2D, None);
@@ -225,8 +244,24 @@ impl Renderer {
 
     /// Wipe draw: old→new diagonal half-plane blend at `progress` (0..=1).
     /// `feather_px` is the edge half-width in output pixels.
-    pub fn draw_wipe(&self, vw: i32, vh: i32, old: glow::Texture, new: glow::Texture, progress: f32, feather_px: f32) {
+    /// Both textures use the same `fit` against the output size.
+    pub fn draw_wipe(
+        &self,
+        vw: i32,
+        vh: i32,
+        old: glow::Texture,
+        old_w: u32,
+        old_h: u32,
+        new: glow::Texture,
+        new_w: u32,
+        new_h: u32,
+        fit: crate::config::FitMode,
+        progress: f32,
+        feather_px: f32,
+    ) {
         let gl = &self.gl;
+        let (osx, osy) = fit_uv_scale(vw, vh, old_w, old_h, fit);
+        let (nsx, nsy) = fit_uv_scale(vw, vh, new_w, new_h, fit);
         unsafe {
             gl.viewport(0, 0, vw, vh);
             gl.use_program(Some(self.prog_wipe));
@@ -236,6 +271,8 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(new));
             gl.uniform_1_i32(self.u_new.as_ref(), 1);
+            gl.uniform_2_f32(self.u_old_scale.as_ref(), osx, osy);
+            gl.uniform_2_f32(self.u_new_scale.as_ref(), nsx, nsy);
             gl.uniform_1_f32(self.u_progress.as_ref(), progress);
             let diag = (vw + vh) as f32;
             gl.uniform_1_f32(self.u_feather.as_ref(), feather_px / diag.max(1.0));
@@ -246,8 +283,16 @@ impl Renderer {
     }
 }
 
-/// UV scale for cover/contain/fill (centered; fill = 1.0).
-fn cover_scale(vw: i32, vh: i32, iw: u32, ih: u32, fit: crate::config::FitMode) -> (f32, f32) {
+/// UV window size sampled across the full screen (centered).
+///
+/// Shader: `uv = 0.5 + (screenUv - 0.5) * scale`
+/// - **cover**: both axes ≤ 1 → crop the long side of the image (no stretch)
+/// - **contain**: one axis ≥ 1 → letterbox (shader paints black outside 0..1)
+/// - **fill**: (1,1) → stretch to fill
+///
+/// Earlier this returned the *inverse* (image/screen), which pushed UVs outside
+/// the texture and `CLAMP_TO_EDGE` stretched the top/bottom edges.
+fn fit_uv_scale(vw: i32, vh: i32, iw: u32, ih: u32, fit: crate::config::FitMode) -> (f32, f32) {
     let (vw, vh, iw, ih) = (vw as f32, vh as f32, iw as f32, ih as f32);
     if iw <= 0.0 || ih <= 0.0 || vw <= 0.0 || vh <= 0.0 {
         return (1.0, 1.0);
@@ -255,11 +300,11 @@ fn cover_scale(vw: i32, vh: i32, iw: u32, ih: u32, fit: crate::config::FitMode) 
     match fit {
         crate::config::FitMode::Cover => {
             let s = f32::max(vw / iw, vh / ih);
-            (iw * s / vw, ih * s / vh)
+            (vw / (iw * s), vh / (ih * s))
         }
         crate::config::FitMode::Contain => {
             let s = f32::min(vw / iw, vh / ih);
-            (iw * s / vw, ih * s / vh)
+            (vw / (iw * s), vh / (ih * s))
         }
         crate::config::FitMode::Fill => (1.0, 1.0),
     }

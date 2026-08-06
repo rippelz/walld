@@ -369,16 +369,28 @@ impl Daemon {
             return false;
         }
 
+        let fit = out.fit;
         let mut animating = false;
         if let Some(wipe) = out.wipe.as_ref() {
             let elapsed = wipe.start.elapsed().as_secs_f32() * 1000.0;
             let t = (elapsed / wipe.dur_ms.max(1) as f32).clamp(0.0, 1.0);
             let progress = wayland::ease_out_cubic(t);
-            self.renderer
-                .draw_wipe(w, h, wipe.old.tex, wipe.new.tex, progress, wipe.feather_px);
+            self.renderer.draw_wipe(
+                w,
+                h,
+                wipe.old.tex,
+                wipe.old.w,
+                wipe.old.h,
+                wipe.new.tex,
+                wipe.new.w,
+                wipe.new.h,
+                fit,
+                progress,
+                wipe.feather_px,
+            );
             animating = t < 1.0;
         } else if let Some(cur) = out.current.as_ref() {
-            self.renderer.draw_blit(w, h, cur.tex, cur.w, cur.h, out.fit);
+            self.renderer.draw_blit(w, h, cur.tex, cur.w, cur.h, fit);
         }
 
         self.renderer.swap();
