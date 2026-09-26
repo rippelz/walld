@@ -1,8 +1,18 @@
 # walld
 
-Lightweight **Hyprland** wallpaper daemon for this rice: layer-shell surfaces +
-EGL/GLES, optional diagonal wipe on switch, Unix-socket IPC. Not a general
-toolkit and not a hyprpaper clone.
+A wallpaper engine for **Hyprland**, with a native Rust daemon and the
+**WallStudio** library browser, player, and scene editor. Browse installed
+Wallpaper Engine content, play animated scenes and videos, and derive a desktop
+palette from your wallpaper.
+
+## Screenshots
+
+![WallStudio library and wallpaper controls](docs/screenshots/wallstudio-library.png)
+
+![WallStudio running on Hyprland](docs/screenshots/wallstudio-desktop.png)
+
+Screenshots show installed Steam Workshop content; wallpaper artwork belongs to
+its respective creators and is not included in this repository.
 
 ## What it does
 
@@ -42,6 +52,11 @@ Classic `hyprpaper.conf` image mode still works when `scene` is unset.
 **wallstudio + walld** are a self-contained Wallpaper Engine client for Hyprland.
 No mpvpaper, no linux-wallpaperengine. Content is rendered **inside walld**.
 
+**Scene editor** (workshop-first): select a Scene wallpaper → **Edit scene** (or `E`) →
+forks into `~/.local/share/wallengine/projects/`, opens a second window, live preview
+via the same walld pipeline. Edits write WE `scene.json` (package tree, no in-place
+Steam writes). Checklist: [`SCENE_EDITOR.md`](./SCENE_EDITOR.md).
+
 Fresh install path:
 
 1. Hyprland + Steam + Wallpaper Engine (for workshop content)
@@ -50,18 +65,24 @@ Fresh install path:
 4. Run `wallstudio` → play
 
 ```bash
-cargo build --release -p walld -p wallstudio
+cargo build --release -p walld -p wallstudio -p wallaccent
 install -Dm755 target/release/walld ~/.local/bin/walld
 install -Dm755 target/release/wallstudio ~/.local/bin/wallstudio
+install -Dm755 target/release/wallaccent ~/.local/bin/wallaccent   # wallpaper-derived desktop palette
 walld &          # or wallpaper-boot / systemd
 wallstudio
 ```
 
+`wallaccent` must sit next to `walld` (or on `PATH`) for WallStudio to update
+the desktop palette when a wallpaper switches: waybar, Kitty (including text),
+KDE/Qt applications such as Dolphin, GTK, Hyprland, notifications and Rofi.
+
 | Type | How walld plays it |
 |------|---------------------|
 | **Video** | In-engine decode (`ffmpeg` as codec → GL texture) |
-| **Scene** | Unpacks `scene.pkg` (PKGV), decodes `.tex`, draws 2D layers (+ snow when detected) |
-| **Web/App** | Not yet |
+| **Scene** | Full WE pipeline: PKGV unpack, TEX (LZ4/ARGB/DXT/RG88/R8), ortho layers, waterflow effect passes, real particle emitters/operators |
+| **Web** | Experimental persistent Chromium renderer; see [Web support](WEB_SUPPORT.md) |
+| **App** | Not supported |
 
 System deps: **ffmpeg** (video decode), GPU/OpenGL ES. Steam WE for workshop files + optional assets.
 
@@ -86,7 +107,8 @@ Lists `~/.local/share/wallengine/scenes/*`, shows daemon status, Apply → `wall
 ## Build / install
 
 ```bash
-cd ~/code/walld
+git clone https://github.com/rippelz/walld.git
+cd walld
 cargo build --release
 install -Dm755 target/release/walld ~/.local/bin/walld
 ```
@@ -96,7 +118,7 @@ install -Dm755 target/release/walld ~/.local/bin/walld
 | Path | Role |
 |------|------|
 | `~/.config/walld/config` | Global options (`transition`, `wipe_ms`, …) |
-| `~/.config/hypr/hyprpaper.conf` | Per-monitor `wallpaper { … }` blocks (hyprpaper-compatible; `theme apply` already merges this) |
+| `~/.config/hypr/hyprpaper.conf` | Per-monitor `wallpaper { … }` blocks (hyprpaper-compatible) |
 
 Example `~/.config/walld/config`:
 
@@ -121,11 +143,22 @@ walld ctl set  <monitor|*> <path>   # default transition
 walld ctl snap <monitor|*> <path>
 walld ctl wipe <monitor|*> <path>
 walld ctl preload <path>
+walld ctl boot_capture  # force-refresh per-monitor boot stills now
 walld ctl stop     # hide surfaces (video handoff)
 walld ctl start    # recreate surfaces
 walld ctl ready    # ok when every output has a committed frame
 walld ctl quit
 ```
+
+## Boot stills (instant wallpaper on login)
+
+When a wallpaper is applied, walld writes a per-monitor still to
+`$XDG_CACHE_HOME/walld/boot/<monitor>.png` (e.g. `DP-1.png`). On the next
+start those PNGs paint **before** Wallpaper Engine content loads, so you never
+see Hyprland’s default background while the workshop pack spins up.
+
+Stills refresh automatically ~1s after WE has real frames, or on classic
+image set, or via `walld ctl boot_capture`.
 
 ## Autostart (Hyprland)
 
@@ -146,22 +179,10 @@ systemctl --user disable --now hyprpaper.service
 Do **not** run hyprpaper and walld together for daily use — both paint
 background layers.
 
-## Theme integration
-
-`~/.local/bin/theme` (and `~/.config/themes/bin/theme`) drives walld:
-
-| Transition | Order |
-|------------|--------|
-| static → static | `merge_hyprpaper` → `walld reload` (wipe/snap from config) |
-| video → static | walld `start` + `reload` + `ready` **under** video → kill mpvpaper |
-| static → video | optional walld underlayer → hyprmotion start → `walld stop` |
-
-Scripts can poll `walld ctl ready` instead of a fixed `sleep`.
-
 ## Video coexistence (hyprmotion)
 
-- **Static themes** → walld shows images from hyprpaper.conf paths
-- **Video themes** → walld **stop** (hide); hyprmotion / mpvpaper runs
+- **Static wallpapers** → walld shows images from hyprpaper.conf paths
+- **Video wallpapers** → walld **stop** (hide); hyprmotion / mpvpaper runs
 - **Back to static** → walld **start** + set/reload path **before** killing video
   (avoids Hyprland default background flash)
 

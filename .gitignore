@@ -3,3 +3,15 @@
 *.swp
 *~
 .gdb_history
+
+# Local render diagnostics
+/debug_*.png
+/debug_*.ppm
+/live_*.png
+/rdr2_*.png
+/rdr2_*.jpg
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example

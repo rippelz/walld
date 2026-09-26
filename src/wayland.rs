@@ -25,11 +25,14 @@ impl OutputInfo {
     }
 }
 
-/// A decoded+uploaded wallpaper.
+/// A decoded+uploaded wallpaper / WE layer texture.
+#[derive(Clone, Copy)]
 pub struct Texture {
     pub tex: glow::Texture,
     pub w: u32,
     pub h: u32,
+    /// Sample only this UV rect (content inside NPOT-padded buffer). Default (1,1).
+    pub uv_scale: (f32, f32),
 }
 
 /// A wallpaper that should be shown, with the transition used to reveal it.
@@ -57,6 +60,20 @@ pub struct WipeState {
     pub feather_px: f32,
 }
 
+/// In-flight WE→WE wipe: `tex` is a still of the outgoing scene captured into an
+/// FBO texture (window readback would freeze WE video on AMD/Mesa); the live
+/// incoming scene renders beneath it every frame in `draw_we_on`.
+pub struct WipeWe {
+    pub tex: glow::Texture,
+    pub start: Instant,
+    pub dur_ms: u32,
+    pub feather_px: f32,
+    /// Timestamp of the last overlay draw — used to pause the clock while the
+    /// incoming content has nothing drawable yet (e.g. video pre-first-frame),
+    /// so the wipe resumes from zero instead of jumping ahead over black.
+    pub last_draw: Instant,
+}
+
 pub struct Output {
     pub wl_output: WlOutput,
     /// Registry global name of this output (matches GlobalRemove).
@@ -72,6 +89,14 @@ pub struct Output {
     /// Transition queued for the pending path.
     pub pending_transition: crate::config::Transition,
     pub wipe: Option<WipeState>,
+    /// Wallpaper Engine crossfade (old still → live new scene).
+    pub wipe_we: Option<WipeWe>,
+    /// Set while a just-armed `wipe_we` has not had its first overlay draw on
+    /// this output. The arm pass paints the outgoing still over the incoming
+    /// content once, so the video's very first frame (possibly black before
+    /// the decoder warms up) must not be blitted until the overlay has drawn
+    /// atop real content — see `draw_we_on`.
+    pub wipe_pending_first: bool,
 }
 
 pub fn ease_out_cubic(t: f32) -> f32 {

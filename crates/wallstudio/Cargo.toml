@@ -10,7 +10,21 @@ name = "wallstudio"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.14", features = ["tokio", "image"] }
+iced = { version = "0.14", features = ["tokio", "image", "canvas"] }
+image = { version = "0.25", default-features = false, features = ["gif", "png"] }
+# StatusNotifierItem system tray (bottom-right bar icon), Steam-style.
+ksni = { version = "0.3", features = ["blocking"] }
 wallengine-we = { path = "../wallengine-we" }
 wallengine-scene = { path = "../wallengine-scene" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# Decrypt Steam CEF cookies (Chromium v10 / "peanuts") for silent workshop sub/unsub.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+cipher = "0.4"
+pbkdf2 = "0.12"
+sha1 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }

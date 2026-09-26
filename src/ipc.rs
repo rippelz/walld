@@ -32,6 +32,29 @@ pub enum IpcCmd {
     /// Load a Wallpaper Engine package directory (or workshop folder).
     We { monitor: String, path: PathBuf },
     WeStop,
+    /// Debug: `we_debug click <x> <y>` (viewport pixels or 0..1 norms), `we_debug dump`, `we_debug clear`.
+    WeDebug { args: Vec<String> },
+    /// List properties for a wallpaper dir/id as JSON: `we_props <path|id>`
+    WeProps { path: PathBuf },
+    /// Set one property and reload if active: `we_set_prop <path|id> <key> <value…>`
+    WeSetProp {
+        path: PathBuf,
+        key: String,
+        value: String,
+    },
+    /// Reset all user overrides for a wallpaper: `we_reset_props <path|id>`
+    WeResetProps { path: PathBuf },
+    /// Presentation controls: `we_present` (status) or `we_present <key> <value…>`
+    /// keys: pause, rate, mute, fit, zoom, offset, flip_h, flip_v, reset
+    WePresent { args: Vec<String> },
+    /// Editor GPU preview (same WE pipeline as wallpaper, offscreen):
+    /// `we_editor load <path> [max_edge]` | `reload` | `stop` | `status`
+    WeEditor { args: Vec<String> },
+    /// Force-refresh boot stills from the live wallpaper: `boot_capture`
+    BootCapture,
+    /// Re-read `~/.config/walld/config` options only (fps, quality caps)
+    /// without re-applying wallpapers: `cfg_reload`
+    CfgReload,
     Quit,
 }
 
@@ -78,6 +101,34 @@ pub fn parse_line(line: &str) -> Result<IpcCmd, String> {
             IpcCmd::We { monitor, path }
         }
         "we_stop" => IpcCmd::WeStop,
+        "we_debug" => IpcCmd::WeDebug {
+            args: parts.map(|s| s.to_string()).collect(),
+        },
+        "we_props" => IpcCmd::WeProps {
+            path: expand(&next(&mut parts, "<path|id>")?),
+        },
+        "we_set_prop" => {
+            let path = expand(&next(&mut parts, "<path|id>")?);
+            let key = next(&mut parts, "<key>")?;
+            // Remainder of the line is the value (may contain spaces).
+            let rest: Vec<&str> = parts.collect();
+            if rest.is_empty() {
+                return Err("missing <value>".into());
+            }
+            let value = rest.join(" ");
+            IpcCmd::WeSetProp { path, key, value }
+        }
+        "we_reset_props" => IpcCmd::WeResetProps {
+            path: expand(&next(&mut parts, "<path|id>")?),
+        },
+        "we_present" => IpcCmd::WePresent {
+            args: parts.map(|s| s.to_string()).collect(),
+        },
+        "boot_capture" => IpcCmd::BootCapture,
+        "cfg_reload" => IpcCmd::CfgReload,
+        "we_editor" => IpcCmd::WeEditor {
+            args: parts.map(|s| s.to_string()).collect(),
+        },
         "quit" => IpcCmd::Quit,
         other => return Err(format!("unknown command '{other}'")),
     })
@@ -164,5 +215,24 @@ pub fn client_call(line: &str) -> i32 {
         0
     } else {
         1
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_option_only_reload() {
+        assert!(matches!(parse_line("cfg_reload"), Ok(IpcCmd::CfgReload)));
+        // Still distinct from the wallpaper-reapplying reload.
+        assert!(matches!(parse_line("reload"), Ok(IpcCmd::Reload)));
+    }
+
+    #[test]
+    fn unknown_commands_are_rejected() {
+        assert!(parse_line("cfg_reloadx").is_err());
+        assert!(parse_line("").is_err());
     }
 }

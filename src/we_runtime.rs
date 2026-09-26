@@ -1,21 +1,10 @@
 //! Load Wallpaper Engine workshop packages into walld content modes.
+//! Scenes go through the full WeSceneRuntime pipeline (TEX, ortho, particles, effects).
 
 use crate::video::VideoDecoder;
 use std::path::{Path, PathBuf};
-use wallengine_we::pkg::ensure_unpacked;
 use wallengine_we::project::{Project, WallpaperType};
-use wallengine_we::tex::decode_tex_to_rgba;
-
-#[derive(Debug, Clone)]
-pub struct WeImageLayer {
-    pub path_hint: String,
-    /// Decoded pixels ready for upload (consumed once).
-    pub rgba: Option<(u32, u32, Vec<u8>)>,
-    pub origin: (f32, f32),
-    pub size: (f32, f32),
-    pub scale: (f32, f32),
-    pub visible: bool,
-}
+use wallengine_we::scene::WeSceneRuntime;
 
 pub enum WeContent {
     Video {
@@ -23,27 +12,23 @@ pub enum WeContent {
         path: PathBuf,
         decoder: VideoDecoder,
     },
-    /// 2D image stack from a WE scene (best-effort full-scene path without external engines).
+    /// Full WE scene runtime (images + particles + effects).
     Scene {
-        title: String,
-        id: String,
-        layers: Vec<WeImageLayer>,
-        /// Live particle systems (WE particle objects mapped into wallengine-scene).
-        particles: Vec<wallengine_scene::ParticleSystem>,
-        /// Subtle UV motion for waterflow/scroll-style effects.
-        uv_animate: bool,
+        runtime: WeSceneRuntime,
     },
 }
 
 impl WeContent {
     pub fn title(&self) -> &str {
         match self {
-            Self::Video { title, .. } | Self::Scene { title, .. } => title,
+            Self::Video { title, .. } => title,
+            Self::Scene { runtime } => &runtime.title,
         }
     }
 
     pub fn kind_tag(&self) -> &'static str {
         match self {
+            Self::Video { decoder, .. } if decoder.backend == crate::video::VideoBackend::Web => "web",
             Self::Video { .. } => "video",
             Self::Scene { .. } => "we",
         }
@@ -53,7 +38,6 @@ impl WeContent {
 pub fn load_we_dir(dir: &Path) -> Result<WeContent, String> {
     let pj = dir.join("project.json");
     if !pj.is_file() {
-        // maybe path is workshop id under default workshop
         return Err(format!("no project.json in {}", dir.display()));
     }
     let project = Project::load(&pj)?;
@@ -71,14 +55,15 @@ pub fn load_we_dir(dir: &Path) -> Result<WeContent, String> {
                 Ok(WeContent::Video {
                     title: project.title.clone(),
                     path: v.clone(),
-                    decoder: VideoDecoder::start(&v, 30)?,
+                    decoder: VideoDecoder::start(&v, 60)?,
                 })
             } else {
                 load_scene(dir, &project, &id)
             }
         }
-        WallpaperType::Web | WallpaperType::Application => Err(
-            "Web/Application Wallpaper Engine types are not supported yet in walld".into(),
+        WallpaperType::Web => load_web(dir, &project),
+        WallpaperType::Application => Err(
+            "Wallpaper Engine Application projects are not supported by walld".into(),
         ),
     }
 }
@@ -94,7 +79,21 @@ fn load_video(dir: &Path, project: &Project) -> Result<WeContent, String> {
     } else {
         find_video(dir).ok_or_else(|| "video file missing".to_string())?
     };
-    let decoder = VideoDecoder::start(&path, 30)?;
+    let decoder = VideoDecoder::start(&path, 60)?;
+    Ok(WeContent::Video {
+        title: project.title.clone(),
+        path,
+        decoder,
+    })
+}
+
+fn load_web(dir: &Path, project: &Project) -> Result<WeContent, String> {
+    let path = if !project.file.is_empty() {
+        dir.join(&project.file)
+    } else {
+        dir.join("index.html")
+    };
+    let decoder = VideoDecoder::start_web(&path, 15, 1920)?;
     Ok(WeContent::Video {
         title: project.title.clone(),
         path,
@@ -103,243 +102,8 @@ fn load_video(dir: &Path, project: &Project) -> Result<WeContent, String> {
 }
 
 fn load_scene(dir: &Path, project: &Project, id: &str) -> Result<WeContent, String> {
-    let unpacked = if dir.join("scene.pkg").is_file() {
-        ensure_unpacked(dir, id).map_err(|e| e.to_string())?
-    } else {
-        dir.to_path_buf()
-    };
-    let scene_path = unpacked.join("scene.json");
-    if !scene_path.is_file() {
-        return Err("scene.json missing after unpack".into());
-    }
-    let scene: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&scene_path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-
-    let mut particles = Vec::new();
-    let mut uv_animate = false;
-    let mut layers = Vec::new();
-    let objects = scene
-        .get("objects")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    for obj in &objects {
-        // Effect stacks (waterflow, scroll, clouds, …) → mark for UV motion
-        if let Some(effects) = obj.get("effects").and_then(|v| v.as_array()) {
-            for ef in effects {
-                let file = ef.get("file").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
-                let name = ef.get("name").and_then(|v| v.as_str()).unwrap_or("").to_ascii_lowercase();
-                if file.contains("water")
-                    || file.contains("scroll")
-                    || file.contains("cloud")
-                    || file.contains("flow")
-                    || name.contains("water")
-                    || name.contains("scroll")
-                {
-                    uv_animate = true;
-                }
-            }
-        }
-        if let Some(p) = obj.get("particle").and_then(|v| v.as_str()) {
-            let pl = p.to_ascii_lowercase();
-            let visible = obj
-                .get("visible")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            if !visible {
-                continue;
-            }
-            use wallengine_scene::{ParticlePreset, ParticleSystem};
-            let (preset, count, speed, opacity) = if pl.contains("snow") {
-                (ParticlePreset::Snow, 700u32, 0.55, 0.9)
-            } else if pl.contains("leaf") || pl.contains("leaves") {
-                (ParticlePreset::Snow, 200, 0.25, 0.75) // soft falling
-            } else if pl.contains("ember") || pl.contains("fire") {
-                (ParticlePreset::Dust, 350, 0.7, 0.85)
-            } else if pl.contains("smoke") {
-                (ParticlePreset::Dust, 180, 0.2, 0.45)
-            } else {
-                (ParticlePreset::Dust, 250, 0.35, 0.6)
-            };
-            particles.push(ParticleSystem::new(preset, count, speed, opacity));
-            continue;
-        }
-        let visible = obj
-            .get("visible")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if !visible {
-            continue;
-        }
-        let image_ref = match obj.get("image").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() && s != "null" => s,
-            _ => continue,
-        };
-        // resolve model json -> material -> tex name
-        let rgba = resolve_image_pixels(&unpacked, image_ref);
-        let origin = parse_vec2(obj.get("origin")).unwrap_or((0.0, 0.0));
-        let size = parse_vec2(obj.get("size")).unwrap_or((1920.0, 1080.0));
-        let scale = parse_vec2(obj.get("scale")).unwrap_or((1.0, 1.0));
-        layers.push(WeImageLayer {
-            path_hint: image_ref.to_string(),
-            rgba,
-            origin,
-            size,
-            scale,
-            visible: true,
-        });
-    }
-
-    // Prefer largest layer as primary (background)
-    layers.sort_by(|a, b| {
-        let aa = a.size.0 * a.size.1 * a.scale.0 * a.scale.1;
-        let bb = b.size.0 * b.size.1 * b.scale.0 * b.scale.1;
-        bb.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Keep only layers that decoded; if none, try any .tex in materials
-    if layers.iter().all(|l| l.rgba.is_none()) {
-        if let Some((w, h, px)) = find_any_tex(&unpacked) {
-            layers.insert(
-                0,
-                WeImageLayer {
-                    path_hint: "materials/*.tex".into(),
-                    rgba: Some((w, h, px)),
-                    origin: (w as f32 / 2.0, h as f32 / 2.0),
-                    size: (w as f32, h as f32),
-                    scale: (1.0, 1.0),
-                    visible: true,
-                },
-            );
-        }
-    }
-
-    let decoded = layers.iter().filter(|l| l.rgba.is_some()).count();
-    if decoded == 0 {
-        return Err(
-            "could not decode any image layers from this scene (tex format unsupported or empty)"
-                .into(),
-        );
-    }
-    // If scene claims version/animated effects but no particles, still nudge UV for life.
-    if !uv_animate && particles.is_empty() {
-        // many "animated" WE scenes are pure effect stacks on one image
-        if let Some(ver) = scene.get("version") {
-            let _ = ver;
-        }
-    }
-
-    log::info!(
-        "WE scene «{}»: {} objects → {} image layers ({} decoded), particles={}, uv_anim={uv_animate}",
-        project.title,
-        objects.len(),
-        layers.len(),
-        decoded,
-        particles.len(),
-    );
-
-    Ok(WeContent::Scene {
-        title: project.title.clone(),
-        id: id.to_string(),
-        layers,
-        particles,
-        uv_animate,
-    })
-}
-
-fn resolve_image_pixels(root: &Path, image_ref: &str) -> Option<(u32, u32, Vec<u8>)> {
-    // image_ref like models/foo.json
-    let model_path = root.join(image_ref);
-    let material_rel = if model_path.is_file() {
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&model_path).ok()?).ok()?;
-        v.get("material")?.as_str()?.to_string()
-    } else {
-        // maybe direct material
-        image_ref.to_string()
-    };
-    let mat_path = root.join(&material_rel);
-    let tex_stem = if mat_path.is_file() {
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&mat_path).ok()?).ok()?;
-        // passes[0].textures[0]
-        v.get("passes")
-            .and_then(|p| p.as_array())
-            .and_then(|a| a.first())
-            .and_then(|p| p.get("textures"))
-            .and_then(|t| t.as_array())
-            .and_then(|a| a.first())
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
-    let tex_stem = tex_stem.unwrap_or_else(|| {
-        Path::new(&material_rel)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-    // materials/NAME.tex or materials/foo/NAME.tex
-    let candidates = [
-        root.join(format!("materials/{tex_stem}.tex")),
-        root.join(material_rel).with_extension("tex"),
-        root.join(format!("{tex_stem}.tex")),
-    ];
-    for c in candidates {
-        if c.is_file() {
-            if let Ok(data) = std::fs::read(&c) {
-                if let Ok(img) = decode_tex_to_rgba(&data) {
-                    return Some(img);
-                }
-            }
-        }
-    }
-    // walk materials for matching stem
-    let mat_dir = root.join("materials");
-    if let Ok(rd) = std::fs::read_dir(mat_dir) {
-        for ent in rd.flatten() {
-            let p = ent.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("tex") {
-                if p.file_stem().map(|s| s.to_string_lossy()) == Some(tex_stem.as_str().into())
-                    || p.file_name()
-                        .map(|s| s.to_string_lossy().contains(&tex_stem))
-                        .unwrap_or(false)
-                {
-                    if let Ok(data) = std::fs::read(&p) {
-                        if let Ok(img) = decode_tex_to_rgba(&data) {
-                            return Some(img);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn find_any_tex(root: &Path) -> Option<(u32, u32, Vec<u8>)> {
-    let mut best: Option<(u64, u32, u32, Vec<u8>)> = None;
-    fn walk(dir: &Path, best: &mut Option<(u64, u32, u32, Vec<u8>)>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for ent in rd.flatten() {
-            let p = ent.path();
-            if p.is_dir() {
-                walk(&p, best);
-            } else if p.extension().and_then(|e| e.to_str()) == Some("tex") {
-                if let Ok(data) = std::fs::read(&p) {
-                    if let Ok((w, h, rgba)) = decode_tex_to_rgba(&data) {
-                        let score = (w as u64) * (h as u64);
-                        if best.as_ref().map(|b| score > b.0).unwrap_or(true) {
-                            *best = Some((score, w, h, rgba));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    walk(root, &mut best);
-    best.map(|(_, w, h, r)| (w, h, r))
+    let runtime = WeSceneRuntime::load(dir, id, &project.title)?;
+    Ok(WeContent::Scene { runtime })
 }
 
 fn find_video(dir: &Path) -> Option<PathBuf> {
@@ -349,26 +113,6 @@ fn find_video(dir: &Path) -> Option<PathBuf> {
         let ext = p.extension()?.to_string_lossy().to_ascii_lowercase();
         if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
             return Some(p);
-        }
-    }
-    None
-}
-
-fn parse_vec2(v: Option<&serde_json::Value>) -> Option<(f32, f32)> {
-    let v = v?;
-    if let Some(s) = v.as_str() {
-        let mut it = s.split_whitespace();
-        let x = it.next()?.parse().ok()?;
-        let y = it.next()?.parse().ok()?;
-        return Some((x, y));
-    }
-    if let Some(obj) = v.as_object() {
-        // { "value": "1 1 1" }
-        if let Some(s) = obj.get("value").and_then(|x| x.as_str()) {
-            let mut it = s.split_whitespace();
-            let x = it.next()?.parse().ok()?;
-            let y = it.next()?.parse().ok()?;
-            return Some((x, y));
         }
     }
     None

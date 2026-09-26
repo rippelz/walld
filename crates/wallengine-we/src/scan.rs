@@ -1,5 +1,5 @@
 use crate::project::{Project, WallpaperType};
-use crate::{we_myprojects_dir, workshop_dir};
+use crate::{wallengine_projects_dir, we_myprojects_dir, workshop_dir};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -34,6 +34,11 @@ pub fn scan_all() -> Vec<WeEntry> {
     let mut out = Vec::new();
     out.extend(scan_dir(&workshop_dir(), WeSource::Workshop));
     out.extend(scan_dir(&we_myprojects_dir(), WeSource::MyProjects));
+    // wallstudio forks / editable WE package trees
+    out.extend(scan_dir(
+        &wallengine_projects_dir(),
+        WeSource::LocalFolder,
+    ));
     out.sort_by(|a, b| {
         // newer workshop ids first-ish, then title
         b.id.cmp(&a.id)

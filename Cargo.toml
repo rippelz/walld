@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/wallengine-scene", "crates/wallengine-we", "crates/wallstudio"]
+members = [".", "crates/wallaccent", "crates/wallengine-scene", "crates/wallengine-we", "crates/wallstudio"]
 resolver = "2"
 
 [package]
@@ -29,7 +29,14 @@ thiserror = "1"
 nix = { version = "0.28", default-features = false, features = ["time", "process", "fs", "signal"] }
 wallengine-scene = { path = "crates/wallengine-scene" }
 wallengine-we = { path = "crates/wallengine-we" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+# LWE-style video: libmpv OpenGL render API (hwdec + timed present).
+libmpv-sys = "3.1.0"
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+tempfile = "3"
+url = "2"
 
 [profile.release]
 opt-level = 2

@@ -137,4 +137,108 @@ impl Project {
     pub fn is_scene_pkg(&self, dir: &Path) -> bool {
         dir.join("scene.pkg").is_file()
     }
+
+    /// Wallpaper Engine's `schemecolor` property — the author's declared
+    /// accent for this wallpaper (`general.properties.schemecolor.value`,
+    /// "r g b" in 0..1). `None` when the wallpaper doesn't declare one.
+    ///
+    /// Pure white / pure black are treated as "no scheme color": WE ships them
+    /// as filler defaults on wallpapers that never picked a real accent.
+    pub fn scheme_color(&self) -> Option<[f32; 3]> {
+        let v = self
+            .raw
+            .pointer("/general/properties/schemecolor/value")
+            .or_else(|| self.raw.pointer("/general/properties/schemecolor"))?;
+        let rgb = parse_rgb_triplet(v)?;
+        if rgb.iter().all(|c| *c >= 0.999) || rgb.iter().all(|c| *c <= 0.001) {
+            return None;
+        }
+        Some(rgb)
+    }
+}
+
+/// Parse a WE colour value: `"0.5 0.25 1"` (or a `[r, g, b]` array).
+pub fn parse_rgb_triplet(v: &Value) -> Option<[f32; 3]> {
+    let parts: Vec<f32> = match v {
+        Value::String(s) => s
+            .split_whitespace()
+            .filter_map(|x| x.parse::<f32>().ok())
+            .collect(),
+        Value::Array(a) => a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect(),
+        _ => return None,
+    };
+    if parts.len() < 3 || parts.iter().any(|c| !c.is_finite()) {
+        return None;
+    }
+    Some([
+        parts[0].clamp(0.0, 1.0),
+        parts[1].clamp(0.0, 1.0),
+        parts[2].clamp(0.0, 1.0),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn project_with(raw: Value) -> Project {
+        Project {
+            title: "t".into(),
+            description: String::new(),
+            wallpaper_type: WallpaperType::Scene,
+            file: String::new(),
+            preview: None,
+            tags: Vec::new(),
+            workshop_id: None,
+            content_rating: None,
+            raw,
+        }
+    }
+
+    #[test]
+    fn scheme_color_reads_we_property() {
+        let p = project_with(json!({
+            "general": { "properties": { "schemecolor": {
+                "type": "color", "value": "0.23922 0.42353 0.56471"
+            }}}
+        }));
+        let [r, g, b] = p.scheme_color().expect("scheme color");
+        assert!((r - 0.23922).abs() < 1e-5);
+        assert!((g - 0.42353).abs() < 1e-5);
+        assert!((b - 0.56471).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scheme_color_rejects_filler_white_and_black() {
+        let white = project_with(json!({
+            "general": { "properties": { "schemecolor": { "value": "1 1 1" }}}
+        }));
+        assert_eq!(white.scheme_color(), None);
+        let black = project_with(json!({
+            "general": { "properties": { "schemecolor": { "value": "0 0 0" }}}
+        }));
+        assert_eq!(black.scheme_color(), None);
+    }
+
+    #[test]
+    fn scheme_color_absent_or_malformed_is_none() {
+        assert_eq!(project_with(json!({})).scheme_color(), None);
+        let bad = project_with(json!({
+            "general": { "properties": { "schemecolor": { "value": "nope" }}}
+        }));
+        assert_eq!(bad.scheme_color(), None);
+        let short = project_with(json!({
+            "general": { "properties": { "schemecolor": { "value": "0.5 0.5" }}}
+        }));
+        assert_eq!(short.scheme_color(), None);
+    }
+
+    #[test]
+    fn scheme_color_accepts_array_form_and_clamps() {
+        let p = project_with(json!({
+            "general": { "properties": { "schemecolor": { "value": [1.4, 0.5, -0.2] }}}
+        }));
+        assert_eq!(p.scheme_color(), Some([1.0, 0.5, 0.0]));
+    }
 }

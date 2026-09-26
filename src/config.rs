@@ -38,6 +38,12 @@ pub struct WalldConfig {
     pub scene: Option<PathBuf>,
     /// Max FPS for animated scenes.
     pub scene_fps: u32,
+    /// Longest-edge cap for decoded video textures, in pixels.
+    /// 0 = follow the largest connected display (the default).
+    pub video_max_edge: u32,
+    /// Recolor the desktop (wallaccent) whenever the visible wallpaper changes.
+    /// Default on: the point is that the accent follows every switch, live.
+    pub accent_on_change: bool,
 }
 
 impl Default for WalldConfig {
@@ -48,7 +54,10 @@ impl Default for WalldConfig {
             wipe_feather_px: 80.0,
             hyprpaper_conf: default_hyprpaper_conf(),
             scene: None,
-            scene_fps: 30,
+            // 60 matches typical WE video sources; particles still fine at 60.
+            scene_fps: 60,
+            video_max_edge: 0,
+            accent_on_change: true,
         }
     }
 }
@@ -179,6 +188,16 @@ pub fn load_global() -> WalldConfig {
                 if let Ok(n) = v.parse::<u32>() {
                     cfg.scene_fps = n.clamp(5, 120);
                 }
+            }
+            "video_max_edge" => {
+                if let Ok(n) = v.parse::<u32>() {
+                    // 0 keeps the display-matched default; anything else is a
+                    // deliberate cap and gets clamped to something decodable.
+                    cfg.video_max_edge = if n == 0 { 0 } else { n.clamp(640, 7680) };
+                }
+            }
+            "accent_on_change" => {
+                cfg.accent_on_change = matches!(v, "true" | "1" | "yes" | "on");
             }
             _ => log::warn!("config: unknown key '{k}'"),
         }

@@ -11,6 +11,7 @@ fn main() {
         monitors: vec![],
         silent: true,
         fps: 30,
+        backend: wallengine_we::PlayBackend::Walld,
     };
     match wallengine_we::play(&req) {
         Ok(s) => println!("ok {:?} {}", s.backend, s.detail),
